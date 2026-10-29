@@ -1,9 +1,9 @@
-import { useStore } from "../lib/store";
+import { petDisplayId, petPhoto, useStore } from "../lib/store";
 import { PetAvatar, StatusPill } from "./ui";
 
 export default function PetCard({ pet }) {
   const { navigate } = useStore();
-  const front = pet.photos?.front;
+  const front = petPhoto(pet);
 
   return (
     <button
@@ -28,7 +28,7 @@ export default function PetCard({ pet }) {
           <StatusPill status={pet.status} />
         </div>
         <div className="mt-3 flex items-center justify-between border-t border-stone-100 pt-3 text-xs font-semibold text-stone-500">
-          <span className="rounded-md bg-stone-100 px-2 py-1 font-mono">{pet.id}</span>
+          <span className="rounded-md bg-stone-100 px-2 py-1 font-mono">{petDisplayId(pet)}</span>
           <span className="text-pine-800">View profile →</span>
         </div>
       </div>

@@ -19,7 +19,7 @@ function searchPets(pets, text) {
   if (!words.length) return [];
   return pets
     .map((pet) => {
-      const hay = `${pet.name} ${pet.species} ${pet.breed} ${pet.color} ${pet.marks} ${pet.location} ${pet.id}`.toLowerCase();
+      const hay = `${pet.name} ${pet.species} ${pet.breed} ${pet.color} ${pet.marks} ${pet.location} ${pet.tagNumber || ""} ${pet.id}`.toLowerCase();
       const hits = words.filter((w) => hay.includes(w)).length;
       return { pet, hits };
     })
@@ -30,7 +30,7 @@ function searchPets(pets, text) {
 }
 
 function petLine(p) {
-  return `${p.name} — ${p.breed}, ${p.location} (${p.id})`;
+  return `${p.name} — ${p.breed}, ${p.location} (${p.tagNumber || p.id})`;
 }
 
 /**
@@ -53,7 +53,7 @@ export function assistantReply(input, ctx) {
   }
 
   if (has("lost", "missing", "escaped", "run away", "ran away") && has("my", "lost", "missing", "pet", "dog", "cat", "escaped")) {
-    const mine = currentUser ? pets.filter((p) => p.owner === currentUser.email) : [];
+    const mine = currentUser ? pets.filter((p) => p.ownerEmail === currentUser.email) : [];
     return {
       text: currentUser
         ? `I'm sorry — let's move fast:\n\n1. Open your pet's profile and hit "Report as lost" so the alert broadcasts.\n2. Generate a lost-pet poster from the Alerts hub and print it.\n3. Check new sightings on the profile — finders report there.\n\nYou have ${mine.length} registered pet(s).${mine.length ? " Pick one to open it:" : ""}`
@@ -79,7 +79,7 @@ export function assistantReply(input, ctx) {
 
   if (has("microchip", "chip", "collar tag", "tag")) {
     return {
-      text: `AnimalID links microchip numbers and collar tags to one profile. If a pet has either, type it into Find-a-pet search — IDs, chips, and tags are all searchable.\n\nNo chip? The 4-angle photos and scan code on the collar work as backup ID.`,
+      text: `Every AnimalID profile gets an auto-generated tag number (like TAG-001-0001) linked to its photos and owner contact. Type any tag into Find-a-pet search to open the profile instantly.\n\nThe 4-angle photos and scan code on the collar work as backup ID.`,
       replies: ["How do I register?", "I found a pet"],
     };
   }
@@ -101,7 +101,7 @@ export function assistantReply(input, ctx) {
   if (has("my pet", "my dog", "my cat", "my account", "dashboard", "my profile")) {
     if (!currentUser)
       return { text: "You're browsing as a guest — sign in to see your pets and dashboard.", replies: ["How do I register?"] };
-    const mine = pets.filter((p) => p.owner === currentUser.email);
+    const mine = pets.filter((p) => p.ownerEmail === currentUser.email);
     if (!mine.length) return { text: "You don't have any registered pets yet. Registration takes about 10 minutes — want to start?", replies: ["How do I register?"] };
     return {
       text: `You have ${mine.length} registered pet(s):\n${mine.map((p) => `• ${petLine(p)}`).join("\n")}`,

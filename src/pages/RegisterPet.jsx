@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { doc, serverTimestamp, setDoc } from "firebase/firestore";
-import { db } from "../firebase.js";
 import { ScanCode, StatusPill } from "../components/ui";
-import { useStore } from "../lib/store";
+import { apiError } from "../lib/api.js";
+import { petDisplayId, SPECIES_OPTIONS, useStore } from "../lib/store";
 
 const DRAFT_KEY = "animalid.draft";
 
@@ -24,15 +23,12 @@ const EMPTY = {
   color: "",
   weight: "",
   location: "",
-  microchip: "",
-  tagId: "",
   marks: "",
   vet: "",
   contact: "",
-  photos: {},
 };
 
-function downscale(file) {
+function previewFor(file) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
@@ -72,15 +68,18 @@ const inputCls =
   "w-full rounded-xl border border-stone-300 bg-white px-4 py-2.5 text-sm focus:border-pine-700 focus:outline-none";
 
 export default function RegisterPet() {
-  const { currentUser, authReady, navigate, savePet, pets, nextId, toast, logActivity, route } = useStore();
+  const { currentUser, authReady, navigate, savePet, pets, toast, logActivity, route } = useStore();
   const editId = route.query.edit || null;
   const editing = useMemo(
-    () => (editId ? pets.find((p) => p.id === editId) : null),
+    () => (editId ? pets.find((p) => String(p.id) === String(editId)) : null),
     [editId, pets],
   );
 
   const [step, setStep] = useState(0);
   const [form, setForm] = useState(EMPTY);
+  const [files, setFiles] = useState({});
+  const [previews, setPreviews] = useState({});
+  const [retained, setRetained] = useState({});
   const [errors, setErrors] = useState({});
   const [done, setDone] = useState(null);
   const [saving, setSaving] = useState(false);
@@ -92,21 +91,21 @@ export default function RegisterPet() {
   useEffect(() => {
     if (editing) {
       setForm({
-        name: editing.name,
-        species: editing.species,
-        breed: editing.breed,
-        age: editing.age,
-        gender: editing.gender,
-        color: editing.color,
+        name: editing.name || "",
+        species: editing.species || "Dog",
+        breed: editing.breed || "",
+        age: editing.age || "",
+        gender: editing.gender || "Female",
+        color: editing.color || "",
         weight: editing.weight || "",
-        location: editing.location,
-        microchip: editing.microchip || "",
-        tagId: editing.tagId || "",
+        location: editing.location || "",
         marks: editing.marks || "",
         vet: editing.vet || "",
         contact: editing.contact || "",
-        photos: editing.photos || {},
       });
+      setRetained(editing.photos || {});
+      setPreviews(editing.photos || {});
+      setFiles({});
       return;
     }
     try {
@@ -145,13 +144,11 @@ export default function RegisterPet() {
       if (!form.location.trim()) e.location = "City / area is required for alerts.";
     }
     if (s === 1) {
-      if (form.microchip && !/^\d{9,15}$/.test(form.microchip.replace(/\s/g, "")))
-        e.microchip = "Microchip numbers are 9–15 digits.";
       if (!form.contact.trim()) e.contact = "A contact number or email is required.";
     }
     if (s === 2) {
       for (const a of ANGLES.filter((x) => x.required)) {
-        if (!form.photos[a.id]) e[a.id] = `${a.label} photo is required.`;
+        if (!previews[a.id]) e[a.id] = `${a.label} photo is required.`;
       }
     }
     setErrors(e);
@@ -170,31 +167,19 @@ export default function RegisterPet() {
       return;
     }
     try {
-      const dataUrl = await downscale(file);
-      setForm((f) => ({ ...f, photos: { ...f.photos, [angleId]: dataUrl } }));
+      const preview = await previewFor(file);
+      setFiles((f) => ({ ...f, [angleId]: file }));
+      setPreviews((p) => ({ ...p, [angleId]: preview }));
       setErrors((e) => ({ ...e, [angleId]: undefined }));
     } catch {
       toast("Could not read that image. Try another file.", "warn");
     }
   };
 
-  // Persist a pet profile to the Firestore `pets` collection. Photos are
-  // Base64 data URLs produced by downscale(), stored inline in the document —
-  // no Firebase Storage bucket required. Returns true when the cloud write
-  // succeeded (or was skipped in offline mode).
-  const persistPet = async (pet) => {
-    if (!db) return true;
-    try {
-      await setDoc(
-        doc(db, "pets", pet.id),
-        { ...pet, updatedAt: serverTimestamp() },
-        { merge: true },
-      );
-      return true;
-    } catch (err) {
-      console.warn("[pets] Firestore write failed:", err);
-      return false;
-    }
+  const clearPhoto = (angleId) => {
+    setFiles((f) => ({ ...f, [angleId]: undefined }));
+    setPreviews((p) => ({ ...p, [angleId]: undefined }));
+    setRetained((r) => ({ ...r, [angleId]: undefined }));
   };
 
   const submit = async () => {
@@ -204,48 +189,45 @@ export default function RegisterPet() {
       return;
     }
     setSaving(true);
-    const now = Date.now();
-    if (editing) {
-      const updated = {
-        ...editing,
-        ...form,
-        name: form.name.trim(),
-        timeline: [...(editing.timeline || []), { t: now, text: "Profile details updated" }],
-      };
-      const synced = await persistPet(updated);
-      await savePet(updated, { skipRemote: true });
-      logActivity(`${updated.name}'s profile was updated`, currentUser.email);
-      toast(
-        synced ? `${updated.name}'s profile is up to date.` : "Saved on this device, but cloud sync failed.",
-        synced ? "ok" : "warn",
-      );
-      setSaving(false);
-      navigate("pet", updated.id);
-      return;
-    }
-    const pet = {
-      id: nextId(),
-      ...form,
-      name: form.name.trim(),
-      status: "safe",
-      owner: currentUser.email,
-      ownerUid: currentUser.uid || null,
-      ownerName: currentUser.name,
-      createdAt: now,
-      sightings: [],
-      timeline: [{ t: now, text: "Registered on AnimalID" }],
-    };
-    const synced = await persistPet(pet);
-    await savePet(pet, { skipRemote: true });
-    logActivity(`${pet.name} was registered (${pet.id})`, currentUser.email);
     try {
-      localStorage.removeItem(DRAFT_KEY);
-    } catch {
-      /* noop */
+      if (editing) {
+        const updated = await savePet(
+          {
+            ...editing,
+            ...form,
+            name: form.name.trim(),
+            photos: retained,
+            timeline: [...(editing.timeline || []), { t: Date.now(), text: "Profile details updated" }],
+          },
+          files,
+        );
+        logActivity(`${updated.name}'s profile was updated`, currentUser.email);
+        toast(`${updated.name}'s profile is up to date.`);
+        navigate("pet", updated.id);
+        return;
+      }
+      const pet = await savePet(
+        {
+          ...form,
+          name: form.name.trim(),
+          status: "safe",
+          ownerEmail: currentUser.email,
+          ownerName: currentUser.name,
+        },
+        files,
+      );
+      logActivity(`${pet.name} was registered (${petDisplayId(pet)})`, currentUser.email);
+      try {
+        localStorage.removeItem(DRAFT_KEY);
+      } catch {
+        /* noop */
+      }
+      setDone(pet);
+    } catch (err) {
+      toast(apiError(err, "Could not save the profile. Please try again."), "warn");
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
-    if (!synced) toast("Registered on this device, but cloud sync failed.", "warn");
-    setDone(pet);
   };
 
   if (done) {
@@ -258,11 +240,11 @@ export default function RegisterPet() {
           {done.name} is protected!
         </h1>
         <p className="mt-2 text-sm text-stone-600">
-          AnimalID <span className="font-mono font-bold">{done.id}</span> is live. Anyone who finds{" "}
+          AnimalID <span className="font-mono font-bold">{petDisplayId(done)}</span> is live. Anyone who finds{" "}
           {done.name} can now reach you in seconds.
         </p>
         <div className="mx-auto mt-6 flex max-w-md items-center gap-4 rounded-2xl border border-stone-200 bg-white p-4 text-left shadow-sm">
-          <ScanCode seed={done.id} className="h-24 w-24 shrink-0 rounded-lg border border-stone-200" />
+          <ScanCode seed={petDisplayId(done)} className="h-24 w-24 shrink-0 rounded-lg border border-stone-200" />
           <div className="text-sm">
             <p className="font-bold text-pine-950">{done.name}'s scan code is ready</p>
             <p className="mt-1 text-stone-500">
@@ -296,7 +278,7 @@ export default function RegisterPet() {
         </h1>
         <p className="mt-2 text-sm text-stone-600">
           {editing
-            ? `Updating ${editing.id}. Changes go live immediately.`
+            ? `Updating ${petDisplayId(editing)}. Changes go live immediately.`
             : "Four quick steps. Your progress saves automatically as a draft."}
         </p>
 
@@ -345,7 +327,7 @@ export default function RegisterPet() {
               </Field>
               <Field label="Species *">
                 <select value={form.species} onChange={(e) => set("species", e.target.value)} className={`${inputCls} cursor-pointer`}>
-                  {["Dog", "Cat", "Bird", "Rabbit", "Other"].map((s) => (
+                  {SPECIES_OPTIONS.map((s) => (
                     <option key={s}>{s}</option>
                   ))}
                 </select>
@@ -390,13 +372,16 @@ export default function RegisterPet() {
 
           {step === 1 && (
             <div className="grid gap-5 sm:grid-cols-2">
-              <Field label="Microchip number" hint="9–15 digits, usually on adoption paperwork.">
-                <input value={form.microchip} onChange={(e) => set("microchip", e.target.value)} placeholder="985141042118203" className={`${inputCls} font-mono`} inputMode="numeric" />
-                {errors.microchip && <Err msg={errors.microchip} />}
-              </Field>
-              <Field label="Collar tag ID" hint="Anything engraved on the current tag.">
-                <input value={form.tagId} onChange={(e) => set("tagId", e.target.value)} placeholder="TAG-MPL-88" className={`${inputCls} font-mono`} />
-              </Field>
+              <div className="sm:col-span-2">
+                <div className="rounded-2xl bg-pine-50 p-4 text-sm">
+                  <p className="font-bold text-pine-950">Tag number: generated automatically</p>
+                  <p className="mt-1 text-stone-600">
+                    {editing
+                      ? `This pet's permanent tag is ${petDisplayId(editing)}.`
+                      : "On submit, your pet gets a permanent tag (e.g. TAG-001-0001) — no need to invent one."}
+                  </p>
+                </div>
+              </div>
               <div className="sm:col-span-2">
                 <Field label="Distinctive markings" hint="The details a stranger would notice first.">
                   <textarea value={form.marks} onChange={(e) => set("marks", e.target.value)} rows={3} placeholder="Small white chest patch, freckle on nose, notch on right ear…" className={inputCls} />
@@ -427,12 +412,12 @@ export default function RegisterPet() {
                       </p>
                     </div>
                     <p className="px-1 text-xs text-stone-500">{a.hint}</p>
-                    {form.photos[a.id] ? (
+                    {previews[a.id] ? (
                       <div className="relative mt-2">
-                        <img src={form.photos[a.id]} alt={`${a.label} of ${form.name || "pet"}`} className="h-40 w-full rounded-xl object-cover" />
+                        <img src={previews[a.id]} alt={`${a.label} of ${form.name || "pet"}`} className="h-40 w-full rounded-xl object-cover" />
                         <button
                           type="button"
-                          onClick={() => setForm((f) => ({ ...f, photos: { ...f.photos, [a.id]: undefined } }))}
+                          onClick={() => clearPhoto(a.id)}
                           className="absolute top-2 right-2 cursor-pointer rounded-lg bg-black/60 px-2.5 py-1.5 text-xs font-bold text-white hover:bg-black/80"
                         >
                           Replace
@@ -475,8 +460,7 @@ export default function RegisterPet() {
                   ["Age", form.age],
                   ["Color", form.color + (form.weight ? ` · ${form.weight}` : "")],
                   ["Location", form.location],
-                  ["Microchip", form.microchip || "—"],
-                  ["Tag ID", form.tagId || "—"],
+                  ["Tag number", editing ? petDisplayId(editing) : "Auto-generated on submit"],
                   ["Vet", form.vet || "—"],
                   ["Contact", form.contact],
                 ].map(([k, v]) => (
@@ -495,8 +479,8 @@ export default function RegisterPet() {
               <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
                 {ANGLES.map((a) => (
                   <div key={a.id}>
-                    {form.photos[a.id] ? (
-                      <img src={form.photos[a.id]} alt={a.label} className="h-24 w-full rounded-xl object-cover" />
+                    {previews[a.id] ? (
+                      <img src={previews[a.id]} alt={a.label} className="h-24 w-full rounded-xl object-cover" />
                     ) : (
                       <div className="grid h-24 place-items-center rounded-xl bg-stone-100 text-xs font-semibold text-stone-400">
                         No photo

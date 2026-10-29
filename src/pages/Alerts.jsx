@@ -1,19 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
-import {
-  addDoc,
-  collection,
-  onSnapshot,
-  query,
-  serverTimestamp,
-  where,
-} from "firebase/firestore";
-import { db } from "../firebase.js";
+import { useMemo, useState } from "react";
 import { PetAvatar, ScanCode } from "../components/ui";
-import { timeAgo, useStore } from "../lib/store";
+import { apiError } from "../lib/api.js";
+import { petDisplayId, petPhoto, SPECIES_OPTIONS, timeAgo, useStore } from "../lib/store";
 
 export function lostSince(pet) {
   const entry = (pet.timeline || []).filter((t) => t.text.toLowerCase().includes("lost")).pop();
-  return entry ? entry.t : pet.createdAt;
+  return entry ? entry.t : new Date(pet.createdAt || Date.now()).getTime();
 }
 
 function TearTabs({ phone }) {
@@ -38,7 +30,7 @@ function TearTabs({ phone }) {
 }
 
 export function PosterSheet({ pet, custom }) {
-  const photo = pet.photos?.[custom.angle] || pet.photos?.front;
+  const photo = petPhoto(pet, custom.angle) || petPhoto(pet);
   return (
     <div id="poster-print" className="mx-auto w-full max-w-md overflow-hidden rounded-lg border-4 border-ember-600 bg-white">
       <div className="bg-ember-600 px-6 py-4 text-center">
@@ -83,9 +75,9 @@ export function PosterSheet({ pet, custom }) {
         </div>
 
         <div className="mt-4 flex items-center gap-4 rounded-md bg-stone-100 p-3">
-          <ScanCode seed={pet.id} className="h-20 w-20 shrink-0 rounded border border-stone-300" />
+          <ScanCode seed={petDisplayId(pet)} className="h-20 w-20 shrink-0 rounded border border-stone-300" />
           <div className="text-xs font-semibold text-stone-600">
-            <p className="font-mono text-base font-bold text-stone-900">{pet.id}</p>
+            <p className="font-mono text-base font-bold text-stone-900">{petDisplayId(pet)}</p>
             <p className="mt-1 leading-snug">
               Scan to open {pet.name}'s live profile and report a sighting instantly.
             </p>
@@ -163,7 +155,7 @@ function PosterModal({ pet, onClose }) {
                 {["front", "left", "right", "mark"].map((a) => (
                   <option key={a} value={a}>
                     {a === "front" ? "Front face" : a === "left" ? "Left side" : a === "right" ? "Right side" : "Identifying mark"}
-                    {pet.photos?.[a] ? "" : " (none uploaded)"}
+                    {petPhoto(pet, a) ? "" : " (none uploaded)"}
                   </option>
                 ))}
               </select>
@@ -188,83 +180,30 @@ function PosterModal({ pet, onClose }) {
   );
 }
 
-/** Map a Firestore `alerts` doc onto the pet-card shape used below. */
-function alertToPet(a) {
-  return {
-    id: a.petId,
-    name: a.name || "Unknown pet",
-    species: a.species || "Other",
-    breed: a.breed || "Unknown",
-    color: a.color || "",
-    gender: "",
-    age: "",
-    location: a.location || "",
-    contact: a.contact || "",
-    marks: a.marks || "",
-    status: "lost",
-    createdAt: a.lostAt || Date.now(),
-    photos: a.photo ? { front: a.photo } : {},
-    sightings: [],
-    timeline: [{ t: a.lostAt || Date.now(), text: "Reported lost" }],
-  };
-}
-
 export default function Alerts() {
-  const { pets, route, navigate, toast } = useStore();
+  const { pets, route, navigate, toast, subscribeAlerts } = useStore();
   const q = route.query;
   const [location, setLocation] = useState(q.location || "");
   const [species, setSpecies] = useState(q.species || "Any species");
   const [recency, setRecency] = useState(q.recency || "any");
   const [keyword, setKeyword] = useState(q.q || "");
   const [email, setEmail] = useState("");
-  // Live Firestore state. cloudLost === null means "not loaded / offline",
-  // in which case the hub falls back to the store's pet list.
-  const [cloudLost, setCloudLost] = useState(null);
-  const [cloudAlerts, setCloudAlerts] = useState([]);
 
-  useEffect(() => {
-    if (!db) return;
-    const unsubs = [
-      onSnapshot(
-        query(collection(db, "pets"), where("status", "==", "lost")),
-        (snap) => setCloudLost(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
-        () => setCloudLost(null),
-      ),
-      onSnapshot(
-        query(collection(db, "alerts"), where("status", "==", "lost")),
-        (snap) => setCloudAlerts(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
-        () => setCloudAlerts([]),
-      ),
-    ];
-    return () => unsubs.forEach((u) => u());
-  }, []);
-
-  const storeLost = useMemo(() => pets.filter((p) => p.status === "lost"), [pets]);
-
-  const lost = useMemo(() => {
-    const base = cloudLost ?? storeLost;
-    const known = new Set(base.map((p) => p.id));
-    const extras = cloudAlerts
-      .filter((a) => a.petId && !known.has(a.petId))
-      .map(alertToPet);
-    return [...base, ...extras];
-  }, [cloudLost, storeLost, cloudAlerts]);
+  const lost = useMemo(
+    () => pets.filter((p) => p.status === "lost").sort((a, b) => lostSince(b) - lostSince(a)),
+    [pets],
+  );
 
   const subscribe = async (e) => {
     e.preventDefault();
     if (!email.includes("@")) return toast("Enter a valid email to subscribe.", "warn");
-    if (db) {
-      try {
-        await addDoc(collection(db, "alertSubscriptions"), {
-          email: email.trim().toLowerCase(),
-          createdAt: serverTimestamp(),
-        });
-      } catch {
-        return toast("Couldn't save your subscription. Please try again.", "warn");
-      }
+    try {
+      await subscribeAlerts(email, location);
+      setEmail("");
+      toast("Subscribed! You'll get alerts for your area.");
+    } catch (err) {
+      toast(apiError(err, "Couldn't save your subscription. Please try again."), "warn");
     }
-    setEmail("");
-    toast("Subscribed! You'll get alerts for your area.");
   };
 
   const results = useMemo(() => {
@@ -275,8 +214,8 @@ export default function Alerts() {
     return lost
       .filter((p) => {
         if (q.species && q.species !== "Any species" && p.species !== q.species) return false;
-        if (loc && !p.location.toLowerCase().includes(loc)) return false;
-        if (kw && ![p.name, p.breed, p.color, p.marks, p.id].join(" ").toLowerCase().includes(kw)) return false;
+        if (loc && !String(p.location || "").toLowerCase().includes(loc)) return false;
+        if (kw && ![p.name, p.breed, p.color, p.marks, p.tagNumber, p.id].join(" ").toLowerCase().includes(kw)) return false;
         if (now - lostSince(p) > window_ms) return false;
         return true;
       })
@@ -294,7 +233,7 @@ export default function Alerts() {
     navigate("alerts", null, query);
   };
 
-  const posterPet = q.poster ? pets.find((p) => p.id === q.poster) : null;
+  const posterPet = q.poster ? pets.find((p) => String(p.id) === String(q.poster)) : null;
 
   const openPoster = (id) => navigate("alerts", null, { ...q, poster: id });
   const closePoster = () => {
@@ -309,7 +248,7 @@ export default function Alerts() {
           <p className="text-xs font-bold tracking-widest text-ember-600 uppercase">
             {lost.length} active alert{lost.length === 1 ? "" : "s"}
             <span className="ml-2 font-semibold normal-case text-stone-400">
-              · {db ? "live from Firestore" : "demo data — add Firebase config for live alerts"}
+              · live from the registry
             </span>
           </p>
           <h1 className="font-display mt-1 text-4xl font-bold tracking-tight text-pine-950">
@@ -351,7 +290,7 @@ export default function Alerts() {
             className="cursor-pointer rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-sm font-medium focus:border-pine-700 focus:outline-none"
             aria-label="Species"
           >
-            {["Any species", "Dog", "Cat", "Bird", "Rabbit", "Other"].map((s) => (
+            {["Any species", ...SPECIES_OPTIONS].map((s) => (
               <option key={s}>{s}</option>
             ))}
           </select>
@@ -382,8 +321,8 @@ export default function Alerts() {
         {results.map((p) => (
           <article key={p.id} className="overflow-hidden rounded-2xl border border-ember-100 bg-white shadow-sm">
             <div className="flex gap-4 p-4">
-              {p.photos?.front ? (
-                <img src={p.photos.front} alt={p.name} className="h-28 w-28 shrink-0 rounded-xl object-cover" />
+              {petPhoto(p) ? (
+                <img src={petPhoto(p)} alt={p.name} className="h-28 w-28 shrink-0 rounded-xl object-cover" />
               ) : (
                 <PetAvatar pet={p} className="h-28 w-28 shrink-0 rounded-xl [&_span:first-of-type]:text-4xl" />
               )}
@@ -401,7 +340,7 @@ export default function Alerts() {
                   {p.marks || "No marking details recorded."}
                 </p>
                 <p className="mt-1 font-mono text-[11px] font-bold text-stone-400">
-                  {p.id} · {p.sightings?.length || 0} sighting(s)
+                  {petDisplayId(p)} · {p.sightings?.length || 0} sighting(s)
                 </p>
               </div>
             </div>

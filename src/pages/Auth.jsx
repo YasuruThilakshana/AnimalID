@@ -1,33 +1,6 @@
 import { useEffect, useState } from "react";
-import {
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
-  updateProfile,
-} from "firebase/auth";
-import { auth } from "../firebase.js";
 import { ScanCode } from "../components/ui";
 import { useStore } from "../lib/store";
-
-function friendlyAuthError(code) {
-  switch (code) {
-    case "auth/email-already-in-use":
-      return "An account with this email already exists. Try signing in instead.";
-    case "auth/invalid-email":
-      return "Please enter a valid email address.";
-    case "auth/weak-password":
-      return "Password must be at least 6 characters.";
-    case "auth/user-not-found":
-    case "auth/wrong-password":
-    case "auth/invalid-credential":
-      return "Incorrect email or password.";
-    case "auth/too-many-requests":
-      return "Too many attempts. Please wait a moment and try again.";
-    case "auth/network-request-failed":
-      return "Network error. Check your connection and try again.";
-    default:
-      return "Something went wrong. Please try again.";
-  }
-}
 
 export default function Auth() {
   const { route, navigate, signUp, signIn, signInDemo, currentUser, authReady, toast } = useStore();
@@ -50,35 +23,21 @@ export default function Auth() {
       return setError("Please enter a valid email address.");
     if (password.length < 6) return setError("Password must be at least 6 characters.");
 
-    const next = () => navigate(route.query.next === "register" ? "register" : "dashboard");
-
-    // Offline demo mode: fall back to local accounts.
-    if (!auth) {
-      const res =
-        mode === "up" ? signUp(name, email, password) : signIn(email, password);
-      if (res.error) return setError(res.error);
-      toast(mode === "up" ? `Welcome to AnimalID, ${res.user.name.split(" ")[0]}!` : `Welcome back, ${res.user.name.split(" ")[0]}!`);
-      next();
-      return;
-    }
-
     setBusy(true);
-    try {
-      if (mode === "up") {
-        const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
-        await updateProfile(cred.user, { displayName: name.trim() });
-        toast(`Welcome to AnimalID, ${name.trim().split(" ")[0]}!`);
-      } else {
-        const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
-        const first = (cred.user.displayName || cred.user.email || "friend").split(" ")[0];
-        toast(`Welcome back, ${first}!`);
-      }
-      next();
-    } catch (err) {
-      setError(friendlyAuthError(err?.code));
-    } finally {
-      setBusy(false);
-    }
+    const res = mode === "up" ? await signUp(name, email, password) : await signIn(email, password);
+    setBusy(false);
+    if (res.error) return setError(res.error);
+    toast(mode === "up" ? `Welcome to AnimalID, ${res.user.name.split(" ")[0]}!` : `Welcome back, ${res.user.name.split(" ")[0]}!`);
+    navigate(route.query.next === "register" ? "register" : "dashboard");
+  };
+
+  const useDemo = async () => {
+    setBusy(true);
+    const res = await signInDemo();
+    setBusy(false);
+    if (res.error) return setError(res.error);
+    toast("Signed in with the demo account.");
+    navigate("dashboard");
   };
 
   const inputCls =
@@ -98,7 +57,7 @@ export default function Auth() {
             </h1>
             <ul className="mt-6 space-y-4 text-sm">
               {[
-                ["Register unlimited pets", "IDs, photos, chips, and vet records in one place."],
+                ["Register unlimited pets", "IDs, photos, tags, and vet records in one place."],
                 ["Instant lost-pet alerts", "Broadcast to nearby members the second one goes missing."],
                 ["Scannable recovery tags", "Anyone with a phone can reach you — no app needed."],
               ].map(([t, d]) => (
@@ -228,17 +187,14 @@ export default function Auth() {
           </div>
 
           <button
-            onClick={() => {
-              signInDemo();
-              toast("Signed in with the demo account.");
-              navigate("dashboard");
-            }}
-            className="w-full cursor-pointer rounded-xl border border-pine-700/30 bg-pine-50 px-4 py-3 text-sm font-bold text-pine-900 hover:bg-pine-100"
+            onClick={useDemo}
+            disabled={busy}
+            className="w-full cursor-pointer rounded-xl border border-pine-700/30 bg-pine-50 px-4 py-3 text-sm font-bold text-pine-900 hover:bg-pine-100 disabled:opacity-60"
           >
             Explore with a demo account
           </button>
           <p className="mt-3 text-center text-xs text-stone-400">
-            Demo includes 2 registered pets and a lost-pet alert.
+            Demo signs you in instantly so you can register pets right away.
           </p>
         </div>
       </div>

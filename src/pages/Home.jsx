@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import PetCard from "../components/PetCard";
 import { PetAvatar, ScanCode, StatusPill } from "../components/ui";
-import { timeAgo, useStore } from "../lib/store";
+import { petDisplayId, petPhoto, timeAgo, useStore } from "../lib/store";
 
 function HeroSearch() {
   const { navigate } = useStore();
@@ -51,9 +51,9 @@ function HeroSearch() {
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Enter AnimalID, tag, or microchip — e.g. AID-10482"
+            placeholder="Enter AnimalID or tag — e.g. TAG-001-0001"
             className="min-w-0 flex-1 rounded-xl border border-stone-200 px-4 py-3 text-sm focus:border-pine-700 focus:outline-none"
-            aria-label="Animal ID, tag, or microchip number"
+            aria-label="Animal ID or tag number"
           />
         )}
         {tab === "description" && (
@@ -97,16 +97,9 @@ function HeroSearch() {
   );
 }
 
-const FALLBACK_FEED = [
-  { offset: 36e5, text: "Rocky was reunited with Leo in Chicago" },
-  { offset: 72e5, text: "New sighting reported for Pepper in Austin" },
-  { offset: 9e6, text: "Biscuit listed as found in Denver" },
-];
-const FEED_BASE = Date.now();
-
 function IdCardMock({ pet }) {
   if (!pet) return null;
-  const photo = pet.photos?.front;
+  const photo = petPhoto(pet);
   return (
     <div className="w-full max-w-sm rotate-2 rounded-2xl border border-white/15 bg-white p-4 text-pine-950 shadow-2xl">
       <div className="flex items-center justify-between">
@@ -124,9 +117,9 @@ function IdCardMock({ pet }) {
           <p className="mt-1 truncate text-xs font-medium text-stone-500">
             {pet.breed} · {pet.color}
           </p>
-          <p className="mt-1 font-mono text-sm font-bold">{pet.id}</p>
+          <p className="mt-1 font-mono text-sm font-bold">{petDisplayId(pet)}</p>
         </div>
-        <ScanCode seed={pet.id} className="ml-auto h-16 w-16 shrink-0 rounded-md border border-stone-200" />
+        <ScanCode seed={petDisplayId(pet)} className="ml-auto h-16 w-16 shrink-0 rounded-md border border-stone-200" />
       </div>
       <div className="ticket-edge my-3" />
       <div className="flex items-center justify-between text-xs font-semibold text-stone-500">
@@ -144,10 +137,11 @@ export default function Home() {
     const reunions = pets.filter((p) =>
       p.timeline?.some((t) => t.text.toLowerCase().includes("reunit")),
     ).length;
+    const lostCount = pets.filter((p) => p.status === "lost").length;
     return [
-      { n: `${(12840 + pets.length).toLocaleString()}`, label: "pets protected" },
-      { n: `${(1932 + reunions * 7).toLocaleString()}`, label: "reunions this year" },
-      { n: "31 hrs", label: "median time to reunion" },
+      { n: pets.length.toLocaleString(), label: "pets protected" },
+      { n: reunions.toLocaleString(), label: "reunions recorded" },
+      { n: lostCount.toLocaleString(), label: "active lost alerts" },
       { n: "460+", label: "partner shelters" },
     ];
   }, [pets]);
@@ -175,8 +169,8 @@ export default function Home() {
               forever.
             </h1>
             <p className="mt-5 max-w-xl text-base leading-relaxed text-stone-600">
-              AnimalID gives every pet a scannable identity — four photo angles, microchip and tag
-              records, and an owner contact anyone can reach in seconds. Register once, protect for
+              AnimalID gives every pet a scannable identity — four photo angles, an auto-generated
+              tag number, and an owner contact anyone can reach in seconds. Register once, protect for
               life.
             </p>
             <div className="mt-7">
@@ -200,7 +194,7 @@ export default function Home() {
               <ul className="mt-2 space-y-2 text-sm">
                 {(activity.length
                   ? activity.slice(0, 3)
-                  : FALLBACK_FEED.map((f) => ({ t: FEED_BASE - f.offset, text: f.text }))
+                  : [{ t: Date.now(), text: "No recent activity yet — register a pet to get started." }]
                 ).map((a, i) => (
                   <li key={i} className="flex items-start justify-between gap-3 border-b border-white/10 pb-2 last:border-0 last:pb-0">
                     <span className="leading-snug">{a.text}</span>
@@ -253,7 +247,7 @@ export default function Home() {
             {
               n: "02",
               t: "Get a scannable AnimalID",
-              d: "A permanent ID linked to microchip, tag, vet, and your contact. Print it, engrave it, or save it to your phone.",
+              d: "A permanent auto-generated tag linked to photos, vet, and your contact. Print it, engrave it, or save it to your phone.",
             },
             {
               n: "03",
@@ -333,8 +327,8 @@ export default function Home() {
                     onClick={() => navigate("pet", p.id)}
                     className="flex w-full cursor-pointer items-center gap-3 rounded-xl bg-white p-3 text-left shadow-sm hover:shadow"
                   >
-                    {p.photos?.front ? (
-                      <img src={p.photos.front} alt="" className="h-12 w-12 rounded-lg object-cover" />
+                    {petPhoto(p) ? (
+                      <img src={petPhoto(p)} alt="" className="h-12 w-12 rounded-lg object-cover" />
                     ) : (
                       <PetAvatar pet={p} className="h-12 w-12 shrink-0 rounded-lg [&_span:first-of-type]:text-xl" />
                     )}
@@ -347,7 +341,7 @@ export default function Home() {
                         {p.sightings?.length ? `${p.sightings.length} sighting(s)` : "no sightings yet"}
                       </span>
                     </span>
-                    <span className="font-mono text-[11px] font-bold text-stone-400">{p.id}</span>
+                    <span className="font-mono text-[11px] font-bold text-stone-400">{petDisplayId(p)}</span>
                   </button>
                 </li>
               ))}
@@ -378,8 +372,8 @@ export default function Home() {
                     onClick={() => navigate("pet", p.id)}
                     className="flex w-full cursor-pointer items-center gap-3 rounded-xl bg-white p-3 text-left shadow-sm hover:shadow"
                   >
-                    {p.photos?.front ? (
-                      <img src={p.photos.front} alt="" className="h-12 w-12 rounded-lg object-cover" />
+                    {petPhoto(p) ? (
+                      <img src={petPhoto(p)} alt="" className="h-12 w-12 rounded-lg object-cover" />
                     ) : (
                       <PetAvatar pet={p} className="h-12 w-12 shrink-0 rounded-lg [&_span:first-of-type]:text-xl" />
                     )}
@@ -391,7 +385,7 @@ export default function Home() {
                         Held at: {p.location} · contact {p.ownerName}
                       </span>
                     </span>
-                    <span className="font-mono text-[11px] font-bold text-stone-400">{p.id}</span>
+                    <span className="font-mono text-[11px] font-bold text-stone-400">{petDisplayId(p)}</span>
                   </button>
                 </li>
               ))}
@@ -456,7 +450,7 @@ export default function Home() {
               Ten minutes today beats ten days of searching tomorrow.
             </h2>
             <p className="mt-3 max-w-md text-sm text-stone-300">
-              Free for the first pet. Every paid plan funds microchipping at partner shelters.
+              Free for the first pet. Every paid plan funds tagging at partner shelters.
             </p>
           </div>
           <div className="flex flex-col gap-3 sm:flex-row lg:flex-col">

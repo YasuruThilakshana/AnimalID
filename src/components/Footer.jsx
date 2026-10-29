@@ -1,10 +1,23 @@
 import { useState } from "react";
+import { apiError } from "../lib/api.js";
 import { useStore } from "../lib/store";
 import { Logo } from "./ui";
 
 export default function Footer() {
-  const { navigate, toast } = useStore();
+  const { navigate, toast, subscribeAlerts } = useStore();
   const [email, setEmail] = useState("");
+
+  const subscribe = async (e) => {
+    e.preventDefault();
+    if (!email.includes("@")) return toast("Enter a valid email to subscribe.", "warn");
+    try {
+      await subscribeAlerts(email);
+      setEmail("");
+      toast("Subscribed! You'll get alerts for your area.");
+    } catch (err) {
+      toast(apiError(err, "Couldn't save your subscription. Please try again."), "warn");
+    }
+  };
 
   return (
     <footer className="bg-pine-950 text-stone-300">
@@ -65,7 +78,7 @@ export default function Footer() {
         <div>
           <h3 className="text-sm font-bold tracking-wide text-white uppercase">Resources</h3>
           <ul className="mt-3 space-y-2 text-sm">
-            <li className="hover:text-white">Microchipping guide</li>
+            <li className="hover:text-white">Tagging guide</li>
             <li className="hover:text-white">What to do if you find a pet</li>
             <li className="hover:text-white">Shelter partners</li>
             <li className="hover:text-white">Recovery stories</li>
@@ -77,15 +90,7 @@ export default function Footer() {
             Lost-pet alerts near you
           </h3>
           <p className="mt-3 text-sm">Get a text when a pet goes missing within 10 miles.</p>
-          <form
-            className="mt-3 flex gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!email.includes("@")) return toast("Enter a valid email to subscribe.", "warn");
-              setEmail("");
-              toast("Subscribed! You'll get alerts for your area.");
-            }}
-          >
+          <form className="mt-3 flex gap-2" onSubmit={subscribe}>
             <input
               type="email"
               value={email}
@@ -105,8 +110,8 @@ export default function Footer() {
       </div>
       <div className="border-t border-white/10">
         <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-2 px-4 py-5 text-xs text-stone-400 sm:flex-row sm:px-6">
-          <span>© 2026 AnimalID. Built for a hackathon — demo data, no real pets harmed.</span>
-          <span>Every registration funds shelter microchipping.</span>
+          <span>© 2026 AnimalID. Live registry backed by MySQL.</span>
+          <span>Every registration funds shelter tagging.</span>
         </div>
       </div>
     </footer>

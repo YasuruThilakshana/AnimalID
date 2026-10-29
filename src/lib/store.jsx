@@ -6,21 +6,8 @@ import {
   useMemo,
   useState,
 } from "react";
-import { signOut as firebaseSignOut, onAuthStateChanged } from "firebase/auth";
-import {
-  collection,
-  deleteDoc,
-  doc,
-  onSnapshot,
-  serverTimestamp,
-  setDoc,
-  updateDoc,
-} from "firebase/firestore";
-import { auth, db } from "../firebase.js";
+import api, { apiError, getAuthToken, setAuthToken } from "./api.js";
 
-const LS_USERS = "animalid.users";
-const LS_SESSION = "animalid.session";
-const LS_PETS = "animalid.pets";
 const LS_ACTIVITY = "animalid.activity";
 
 function read(key, fallback) {
@@ -45,6 +32,7 @@ const SPECIES_COLORS = {
   Cat: ["#7c4a1e", "#b98a1f"],
   Bird: ["#1d5c7c", "#2f8fb5"],
   Rabbit: ["#6d4a7c", "#9a6fb0"],
+  Elephant: ["#3d4b5c", "#7b8aa0"],
   Other: ["#4a5568", "#718096"],
 };
 
@@ -52,170 +40,7 @@ export function speciesGradient(species) {
   return SPECIES_COLORS[species] || SPECIES_COLORS.Other;
 }
 
-function seedPets() {
-  const now = Date.now();
-  const day = 86_400_000;
-  return [
-    {
-      id: "AID-10482",
-      name: "Maple",
-      species: "Dog",
-      breed: "Golden Retriever",
-      age: "3 years",
-      gender: "Female",
-      color: "Golden",
-      weight: "28 kg",
-      microchip: "985141042118203",
-      tagId: "TAG-MPL-88",
-      marks: "Small white patch on chest, freckle on nose",
-      location: "Portland, OR",
-      status: "safe",
-      owner: "demo@animalid.app",
-      ownerName: "Demo Owner",
-      contact: "(503) 555-0182",
-      vet: "Rose City Vet Clinic",
-      createdAt: now - 210 * day,
-      photos: {},
-      sightings: [],
-      timeline: [
-        { t: now - 210 * day, text: "Registered on AnimalID" },
-        { t: now - 40 * day, text: "Annual details verified" },
-      ],
-    },
-    {
-      id: "AID-22031",
-      name: "Pepper",
-      species: "Cat",
-      breed: "Domestic Shorthair",
-      age: "2 years",
-      gender: "Male",
-      color: "Black",
-      weight: "4.5 kg",
-      microchip: "985141077665431",
-      tagId: "TAG-PPR-14",
-      marks: "White left paw, notch on right ear",
-      location: "Austin, TX",
-      status: "lost",
-      owner: "demo@animalid.app",
-      ownerName: "Demo Owner",
-      contact: "(512) 555-0119",
-      vet: "South Congress Animal Care",
-      createdAt: now - 150 * day,
-      photos: {},
-      sightings: [
-        {
-          t: now - 1 * day,
-          place: "Zilker Park, near the big oak",
-          note: "Black cat with white paw seen near picnic tables.",
-        },
-      ],
-      timeline: [
-        { t: now - 150 * day, text: "Registered on AnimalID" },
-        { t: now - 3 * day, text: "Reported lost near Zilker Park" },
-      ],
-    },
-    {
-      id: "AID-31877",
-      name: "Kiwi",
-      species: "Bird",
-      breed: "Green-cheeked Conure",
-      age: "1 year",
-      gender: "Female",
-      color: "Green / red tail",
-      weight: "70 g",
-      microchip: "",
-      tagId: "TAG-KWI-02",
-      marks: "Leg band #4521, red tail feathers",
-      location: "Seattle, WA",
-      status: "safe",
-      owner: "maya@example.com",
-      ownerName: "Maya R.",
-      contact: "(206) 555-0147",
-      vet: "Avian & Exotic Clinic",
-      createdAt: now - 90 * day,
-      photos: {},
-      sightings: [],
-      timeline: [{ t: now - 90 * day, text: "Registered on AnimalID" }],
-    },
-    {
-      id: "AID-44120",
-      name: "Biscuit",
-      species: "Rabbit",
-      breed: "Holland Lop",
-      age: "8 months",
-      gender: "Male",
-      color: "Cream",
-      weight: "1.8 kg",
-      microchip: "",
-      tagId: "TAG-BSC-77",
-      marks: "Floppy left ear, grey spot on back",
-      location: "Denver, CO",
-      status: "found",
-      owner: "shelter@harborpaws.org",
-      ownerName: "Harbor Paws Shelter",
-      contact: "(303) 555-0160",
-      vet: "Harbor Paws vet team",
-      createdAt: now - 12 * day,
-      photos: {},
-      sightings: [],
-      timeline: [
-        { t: now - 12 * day, text: "Found near Cheesman Park, listed for owner claim" },
-      ],
-    },
-    {
-      id: "AID-55209",
-      name: "Rocky",
-      species: "Dog",
-      breed: "French Bulldog",
-      age: "4 years",
-      gender: "Male",
-      color: "Brindle",
-      weight: "12 kg",
-      microchip: "985141033456789",
-      tagId: "TAG-RKY-31",
-      marks: "Underbite, scar above left eye",
-      location: "Chicago, IL",
-      status: "safe",
-      owner: "leo@example.com",
-      ownerName: "Leo T.",
-      contact: "(312) 555-0133",
-      vet: "Wicker Park Vets",
-      createdAt: now - 300 * day,
-      photos: {},
-      sightings: [],
-      timeline: [
-        { t: now - 300 * day, text: "Registered on AnimalID" },
-        { t: now - 200 * day, text: "Reunited after 2 days (2025)" },
-      ],
-    },
-    {
-      id: "AID-66140",
-      name: "Willow",
-      species: "Cat",
-      breed: "Siamese",
-      age: "5 years",
-      gender: "Female",
-      color: "Seal point",
-      weight: "3.8 kg",
-      microchip: "985141099887766",
-      tagId: "TAG-WLW-09",
-      marks: "Blue eyes, kink at tip of tail",
-      location: "Portland, OR",
-      status: "lost",
-      owner: "priya@example.com",
-      ownerName: "Priya S.",
-      contact: "(503) 555-0171",
-      vet: "Rose City Vet Clinic",
-      createdAt: now - 400 * day,
-      photos: {},
-      sightings: [],
-      timeline: [
-        { t: now - 400 * day, text: "Registered on AnimalID" },
-        { t: now - 2 * day, text: "Reported lost in Laurelhurst" },
-      ],
-    },
-  ];
-}
+export const SPECIES_OPTIONS = ["Dog", "Cat", "Elephant", "Bird", "Rabbit", "Other"];
 
 /** Parse location.hash into { name, param, query } */
 export function parseHash() {
@@ -248,77 +73,29 @@ export function buildHash(name, param, query) {
   return "#/";
 }
 
+/** Display identifier: auto-generated tag (TAG-001-0001) with id fallback. */
+export function petDisplayId(pet) {
+  return pet?.tagNumber || (pet?.id != null ? `AID-${pet.id}` : "");
+}
+
+/** Front photo URL regardless of whether it is an upload URL or data URL. */
+export function petPhoto(pet, angle = "front") {
+  return pet?.photos?.[angle] || (angle === "front" ? pet?.imageUrl : null) || null;
+}
+
 const StoreContext = createContext(null);
 
 let toastSeq = 1;
 
-/** Map a Firebase Auth user onto this app's { name, email, joined } shape. */
-function mapFirebaseUser(user) {
-  if (!user) return null;
-  const email = (user.email || "").toLowerCase();
-  return {
-    uid: user.uid,
-    email,
-    name: user.displayName || (email ? email.split("@")[0] : "Pet Owner"),
-    joined: user.metadata?.creationTime
-      ? new Date(user.metadata.creationTime).getTime()
-      : Date.now(),
-  };
-}
-
-/**
- * Mirror a pet's lost status into the `alerts` collection so the Lost & Found
- * hub can query missing-pet alerts directly. The front photo is stored as an
- * inline Base64 data URL — no Firebase Storage needed.
- */
-async function mirrorLostAlert(pet) {
-  if (!db) return;
-  const ref = doc(db, "alerts", pet.id);
-  if (pet.status === "lost") {
-    await setDoc(
-      ref,
-      {
-        petId: pet.id,
-        name: pet.name,
-        species: pet.species,
-        breed: pet.breed,
-        color: pet.color,
-        location: pet.location,
-        contact: pet.contact,
-        owner: pet.owner,
-        ownerName: pet.ownerName,
-        photo: pet.photos?.front || null,
-        marks: pet.marks || "",
-        status: "lost",
-        lostAt: Date.now(),
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true },
-    );
-  } else {
-    try {
-      await updateDoc(ref, { status: "resolved", updatedAt: serverTimestamp() });
-    } catch {
-      /* no alert doc to resolve — nothing to do */
-    }
-  }
-}
-
 export function StoreProvider({ children }) {
   const [route, setRoute] = useState(parseHash);
-  const [users, setUsers] = useState(() => read(LS_USERS, []));
-  const [session, setSession] = useState(() => read(LS_SESSION, null));
-  const [pets, setPets] = useState(() => {
-    const existing = read(LS_PETS, null);
-    if (existing && Array.isArray(existing) && existing.length) return existing;
-    const seed = seedPets();
-    write(LS_PETS, seed);
-    return seed;
-  });
+  const [pets, setPets] = useState([]);
+  const [petsLoading, setPetsLoading] = useState(true);
+  const [petsError, setPetsError] = useState("");
+  const [currentUser, setCurrentUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
   const [activity, setActivity] = useState(() => read(LS_ACTIVITY, []));
   const [toasts, setToasts] = useState([]);
-  const [firebaseUser, setFirebaseUser] = useState(null);
-  const [authReady, setAuthReady] = useState(!auth);
 
   useEffect(() => {
     const onHash = () => {
@@ -329,36 +106,7 @@ export function StoreProvider({ children }) {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
 
-  useEffect(() => write(LS_USERS, users), [users]);
-  useEffect(() => write(LS_PETS, pets), [pets]);
   useEffect(() => write(LS_ACTIVITY, activity.slice(0, 80)), [activity]);
-  useEffect(() => write(LS_SESSION, session), [session]);
-
-  // Firebase Auth session → app user. No-ops in offline demo mode.
-  useEffect(() => {
-    if (!auth) return;
-    return onAuthStateChanged(auth, (user) => {
-      setFirebaseUser(mapFirebaseUser(user));
-      setAuthReady(true);
-    });
-  }, []);
-
-  // Firestore `pets` collection → live pet list. Keeps local demo data until
-  // the collection actually holds documents, so a fresh project still demos.
-  useEffect(() => {
-    if (!db) return;
-    return onSnapshot(
-      collection(db, "pets"),
-      (snap) => {
-        if (snap.empty) return;
-        const docs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-        setPets(docs);
-      },
-      (err) => {
-        console.warn("[pets] Firestore subscription failed, using local data:", err);
-      },
-    );
-  }, []);
 
   const navigate = useCallback((name, param, query) => {
     const hash = buildHash(name, param, query);
@@ -382,115 +130,155 @@ export function StoreProvider({ children }) {
     setActivity((prev) => [{ t: Date.now(), text, email: email || null }, ...prev].slice(0, 80));
   }, []);
 
-  // Firebase Auth user wins when signed in; otherwise fall back to the
-  // local (offline/demo) session.
-  const currentUser = useMemo(
-    () => firebaseUser || users.find((u) => u.email === session?.email) || null,
-    [firebaseUser, users, session],
-  );
-
-  const signUp = useCallback(
-    (name, email, password) => {
-      email = email.trim().toLowerCase();
-      if (users.some((u) => u.email === email)) return { error: "An account with this email already exists." };
-      const user = { name: name.trim(), email, pass: btoa(password), joined: Date.now() };
-      setUsers((prev) => [...prev, user]);
-      setSession({ email });
-      logActivity(`${user.name} created an account`, email);
-      return { user };
-    },
-    [users, logActivity],
-  );
-
-  const signIn = useCallback(
-    (email, password) => {
-      email = email.trim().toLowerCase();
-      const user = users.find((u) => u.email === email);
-      if (!user || user.pass !== btoa(password)) return { error: "Incorrect email or password." };
-      setSession({ email });
-      logActivity(`${user.name} signed in`, email);
-      return { user };
-    },
-    [users, logActivity],
-  );
-
-  const signInDemo = useCallback(() => {
-    const email = "demo@animalid.app";
-    setUsers((prev) =>
-      prev.some((u) => u.email === email)
-        ? prev
-        : [...prev, { name: "Demo Owner", email, pass: btoa("demo1234"), joined: Date.now() }],
-    );
-    setSession({ email });
-    logActivity("Demo Owner signed in", email);
-  }, [logActivity]);
-
-  const signOut = useCallback(async () => {
-    setSession(null);
-    setFirebaseUser(null);
-    if (auth) {
-      try {
-        await firebaseSignOut(auth);
-      } catch (err) {
-        console.warn("[auth] Firebase sign-out failed:", err);
-      }
+  const refreshPets = useCallback(async () => {
+    setPetsLoading(true);
+    setPetsError("");
+    try {
+      const { data } = await api.get("/animals");
+      setPets(Array.isArray(data) ? data : []);
+    } catch (err) {
+      setPetsError(apiError(err, "Could not load animals from the server."));
+    } finally {
+      setPetsLoading(false);
     }
   }, []);
 
-  const nextId = useCallback(() => {
-    const nums = pets.map((p) => Number(String(p.id).replace(/\D/g, "")) || 0);
-    const n = Math.max(66000, ...nums) + Math.floor(Math.random() * 40 + 7);
-    return `AID-${n}`;
-  }, [pets]);
-
-  // Upsert locally, then persist to Firestore when configured.
-  // Pass { skipRemote: true } when the caller already wrote the document.
-  const savePet = useCallback(
-    async (pet, opts = {}) => {
-      setPets((prev) => {
-        const i = prev.findIndex((p) => p.id === pet.id);
-        if (i >= 0) {
-          const copy = [...prev];
-          copy[i] = pet;
-          return copy;
-        }
-        return [pet, ...prev];
-      });
-      if (opts.skipRemote || !db) return pet;
-      try {
-        await setDoc(
-          doc(db, "pets", pet.id),
-          { ...pet, updatedAt: serverTimestamp() },
-          { merge: true },
-        );
-        await mirrorLostAlert(pet);
-      } catch (err) {
-        console.warn("[pets] Firestore write failed:", err);
-        toast("Saved on this device, but cloud sync failed.", "warn");
+  // Initial load: session (if a token is stored) + animal registry.
+  useEffect(() => {
+    refreshPets();
+    (async () => {
+      if (!getAuthToken()) {
+        setAuthReady(true);
+        return;
       }
-      return pet;
-    },
-    [toast],
-  );
-
-  const deletePet = useCallback(
-    async (id) => {
-      setPets((prev) => prev.filter((p) => p.id !== id));
-      if (!db) return;
       try {
-        await deleteDoc(doc(db, "pets", id));
-        try {
-          await deleteDoc(doc(db, "alerts", id));
-        } catch {
-          /* no alert doc — nothing to do */
-        }
+        const { data } = await api.get("/auth/me");
+        setCurrentUser(data.user);
+      } catch {
+        setAuthToken(null);
+        setCurrentUser(null);
+      } finally {
+        setAuthReady(true);
+      }
+    })();
+  }, [refreshPets]);
+
+  const signUp = useCallback(
+    async (name, email, password) => {
+      try {
+        const { data } = await api.post("/auth/register", { name, email, password });
+        setAuthToken(data.token);
+        setCurrentUser(data.user);
+        logActivity(`${data.user.name} created an account`, data.user.email);
+        return { user: data.user };
       } catch (err) {
-        console.warn("[pets] Firestore delete failed:", err);
-        toast("Removed on this device, but cloud sync failed.", "warn");
+        return { error: apiError(err) };
       }
     },
-    [toast],
+    [logActivity],
   );
+
+  const signIn = useCallback(
+    async (email, password) => {
+      try {
+        const { data } = await api.post("/auth/login", { email, password });
+        setAuthToken(data.token);
+        setCurrentUser(data.user);
+        logActivity(`${data.user.name} signed in`, data.user.email);
+        return { user: data.user };
+      } catch (err) {
+        return { error: apiError(err) };
+      }
+    },
+    [logActivity],
+  );
+
+  const signInDemo = useCallback(async () => {
+    const email = "demo@animalid.app";
+    const password = "demo1234";
+    let res = await signIn(email, password);
+    if (res.error) {
+      res = await signUp("Demo Owner", email, password);
+    }
+    return res;
+  }, [signIn, signUp]);
+
+  const signOut = useCallback(async () => {
+    setAuthToken(null);
+    setCurrentUser(null);
+  }, []);
+
+  /**
+   * Create or update an animal record.
+   * @param {object} pet animal fields (includes `id` when updating)
+   * @param {Record<string, File>} [files] new photo uploads keyed by angle
+   */
+  const savePet = useCallback(async (pet, files = {}) => {
+    const hasFiles = Object.values(files).some(Boolean);
+    if (!hasFiles) {
+      const payload = { ...pet };
+      delete payload.id;
+      delete payload.tagNumber;
+      delete payload.embedding;
+      delete payload.createdAt;
+      delete payload.updatedAt;
+      if (pet.id) {
+        const { data } = await api.put(`/animals/${pet.id}`, payload);
+        setPets((prev) => prev.map((p) => (String(p.id) === String(data.id) ? data : p)));
+        return data;
+      }
+      const { data } = await api.post("/animals", payload);
+      setPets((prev) => [data, ...prev]);
+      return data;
+    }
+    const form = new FormData();
+    for (const [key, value] of Object.entries(pet)) {
+      if (value === undefined || value === null) continue;
+      if (["id", "tagNumber", "embedding", "createdAt", "updatedAt"].includes(key)) continue;
+      form.append(key, typeof value === "object" ? JSON.stringify(value) : value);
+    }
+    for (const [angle, file] of Object.entries(files)) {
+      if (file) form.append(angle, file);
+    }
+    const { data } = pet.id
+      ? await api.put(`/animals/${pet.id}`, form)
+      : await api.post("/animals", form);
+    setPets((prev) =>
+      pet.id
+        ? prev.map((p) => (String(p.id) === String(data.id) ? data : p))
+        : [data, ...prev],
+    );
+    return data;
+  }, []);
+
+  const deletePet = useCallback(async (id) => {
+    await api.delete(`/animals/${id}`);
+    setPets((prev) => prev.filter((p) => String(p.id) !== String(id)));
+  }, []);
+
+  const reportSighting = useCallback(async (id, place, note) => {
+    const { data } = await api.post(`/animals/${id}/sightings`, { place, note });
+    setPets((prev) => prev.map((p) => (String(p.id) === String(id) ? data : p)));
+    return data;
+  }, []);
+
+  /**
+   * Run a photo scan against the backend. Returns
+   * { match: { animal, similarity, band, reasons } | null, matches: [...] }.
+   */
+  const scanPhoto = useCallback(async (file, hints = {}) => {
+    const form = new FormData();
+    form.append("photo", file);
+    if (hints.species) form.append("species", hints.species);
+    if (hints.markings) form.append("markings", hints.markings);
+    if (hints.location) form.append("location", hints.location);
+    const { data } = await api.post("/animals/scan", form);
+    return data;
+  }, []);
+
+  const subscribeAlerts = useCallback(async (email, location = "") => {
+    await api.post("/alerts/subscribe", { email, location });
+  }, []);
 
   const value = useMemo(
     () => ({
@@ -498,18 +286,21 @@ export function StoreProvider({ children }) {
       navigate,
       toasts,
       toast,
-      users,
       currentUser,
       authReady,
-      firebaseReady: Boolean(db),
       signUp,
       signIn,
       signInDemo,
       signOut,
       pets,
+      petsLoading,
+      petsError,
+      refreshPets,
       savePet,
       deletePet,
-      nextId,
+      reportSighting,
+      scanPhoto,
+      subscribeAlerts,
       activity,
       logActivity,
     }),
@@ -518,7 +309,6 @@ export function StoreProvider({ children }) {
       navigate,
       toasts,
       toast,
-      users,
       currentUser,
       authReady,
       signUp,
@@ -526,9 +316,14 @@ export function StoreProvider({ children }) {
       signInDemo,
       signOut,
       pets,
+      petsLoading,
+      petsError,
+      refreshPets,
       savePet,
       deletePet,
-      nextId,
+      reportSighting,
+      scanPhoto,
+      subscribeAlerts,
       activity,
       logActivity,
     ],

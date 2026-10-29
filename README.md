@@ -1,27 +1,75 @@
-# AnimalID (React + Vite)
+# AnimalID (React + Express + MySQL)
 
-Pet registration, scannable IDs, and a lost & found alerts hub.
+Pet registration, photo-scan identification, and a lost & found alerts hub.
 
-## Firebase setup (Auth + Firestore)
+- **Frontend:** React + Vite + Tailwind (`src/`) — talks to the API with axios.
+- **Backend:** Express + Sequelize ORM over MySQL (`server/`, Controller–Model–Route layout).
 
-1. Create a project in the [Firebase Console](https://console.firebase.google.com), add a Web app, and enable **Authentication → Email/Password** plus **Firestore Database**.
-2. Copy `.env.example` to `.env` and fill in the `VITE_FIREBASE_*` values from Project Settings → Your apps.
-3. `npm install && npm run dev`.
+## Prerequisites
 
-Without a `.env`, the app runs in offline demo mode (localStorage seed data).
-Auth uses Firebase Auth; pet profiles live in the `pets` collection, missing-pet
-alerts in `alerts`, and area-alert signups in `alertSubscriptions`. Pet photos
-are stored as inline Base64 data URLs — no Storage bucket needed.
+- Node.js 18+
+- A running MySQL server (e.g. `root` / `2001@yasuruM` locally)
 
-Currently, two official plugins are available:
+## Backend setup (`server/`)
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+1. `cd server && npm install`
+2. Copy `.env.example` to `.env` and check the credentials:
+   `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `PORT`.
+3. `npm run dev` (or `npm start`)
 
-## React Compiler
+On boot the server creates the database if missing and runs
+`sequelize.sync({ alter: true })`, so all tables (`animals`, `users`,
+`alert_subscriptions`) are created automatically — no SQL imports needed.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Uploaded pet photos are stored in `server/uploads/` and served at `/uploads/*`.
 
-## Expanding the Oxlint configuration
+### Photo scan (Meta AI SAM 3.1)
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+`POST /api/animals/scan` accepts a multipart `photo` file plus optional
+`species` / `markings` / `location` hints. The backend embeds the image with
+the SAM 3.1 API (key in `SAM_API_KEY`, never exposed to the frontend), then
+ranks every stored record with cosine similarity and returns the best match
+with a similarity percentage. Without a key it uses a deterministic local
+embedding so development still works.
+
+### API endpoints
+
+| Method | Path                     | Description                        |
+| ------ | ------------------------ | ---------------------------------- |
+| GET    | /api/health              | Health check                       |
+| GET    | /api/animals             | List animals (`?q=&species=&status=&location=&owner=`) |
+| GET    | /api/animals/:id         | Get one record                     |
+| POST   | /api/animals             | Register (multipart photo angles)  |
+| PUT    | /api/animals/:id         | Update a record                    |
+| DELETE | /api/animals/:id         | Delete a record                    |
+| POST   | /api/animals/:id/sightings | Report a sighting                |
+| POST   | /api/animals/scan        | Photo search (multipart `photo`)   |
+| POST   | /api/auth/register       | Create account (returns JWT)       |
+| POST   | /api/auth/login          | Sign in (returns JWT)              |
+| GET    | /api/auth/me             | Current user (Bearer token)        |
+| POST   | /api/alerts/subscribe    | Area-alert signup                  |
+
+New animals get an auto-generated tag number (`TAG-001-0001`, …) derived from
+the auto-incremented primary key.
+
+## Frontend setup (repo root)
+
+1. `npm install`
+2. Optionally copy `.env.example` to `.env` to point `VITE_API_URL` at a
+   remote API (defaults to `/api`, proxied to `localhost:5000` in dev).
+3. `npm run dev` (start the backend first)
+
+## Project layout
+
+```
+src/            React frontend (pages, components, lib/store.jsx, lib/api.js)
+server/src/
+  server.js     Express app + automatic DB sync
+  config/       Sequelize connection + DB auto-create
+  models/       Animal (animals), User (users), AlertSubscription
+  controllers/  Request handlers (animals, auth)
+  routes/       /api/animals, /api/auth, /api/alerts
+  services/     SAM 3.1 embedding client (+ local fallback)
+  utils/        Cosine similarity
+  middleware/   Multer image-upload handling
+```

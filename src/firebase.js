@@ -1,35 +1,24 @@
-import { getApps, getApp, initializeApp } from "firebase/app";
+yimport { initializeApp } from "firebase/app";
 import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
+import { getStorage } from "firebase/storage";
 
-// Firebase project credentials come from Vite env vars (see .env.example).
-// The app runs in offline demo mode (localStorage) when these are not set.
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  apiKey: "AIzaSyDrMqldsm7s2urwNh_y5ot1wH7A-VANUDg",
+  authDomain: "animalid-7d0ca.firebaseapp.com",
+  projectId: "animalid-7d0ca",
+  storageBucket: "animalid-7d0ca.firebasestorage.app",
+  messagingSenderId: "396155391939",
+  appId: "1:396155391939:web:f12ea161f6242f2fefb776",
+  measurementId: "G-9TLGZGJ8F8"
 };
 
-export const isFirebaseConfigured = Boolean(
-  firebaseConfig.apiKey && firebaseConfig.projectId,
-);
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);
 
-let app = null;
-let auth = null;
-let db = null;
+// Export Services
+export const auth = getAuth(app);
+export const db = getFirestore(app);
+export const storage = getStorage(app);
 
-if (isFirebaseConfigured) {
-  app = getApps().length ? getApp() : initializeApp(firebaseConfig);
-  auth = getAuth(app);
-  db = getFirestore(app);
-} else if (import.meta.env.DEV) {
-  console.warn(
-    "[firebase] Missing VITE_FIREBASE_* env vars — running in offline demo mode.",
-  );
-}
-
-export { app, auth, db };
 export default app;

@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { PetAvatar, StatusPill } from "../components/ui";
-import { fileToDataUrl, scorePets } from "../lib/matcher";
-import { useStore } from "../lib/store";
+import { apiError } from "../lib/api.js";
+import { fileToDataUrl } from "../lib/matcher";
+import { petDisplayId, petPhoto, SPECIES_OPTIONS, useStore } from "../lib/store";
 
 const PHASES = [
   "Detecting animal in photo…",
-  "Mapping coat patterns and markings…",
+  "Generating embedding with SAM 3.1…",
   "Comparing against registered profiles…",
   "Ranking matches…",
 ];
@@ -16,9 +17,16 @@ const BAND_STYLE = {
   Low: "bg-stone-200 text-stone-600",
 };
 
+async function urlToFile(url, name = "sample.jpg") {
+  const res = await fetch(url);
+  const blob = await res.blob();
+  return new File([blob], name, { type: blob.type || "image/jpeg" });
+}
+
 export default function Scanner() {
-  const { pets, navigate, logActivity } = useStore();
+  const { pets, navigate, logActivity, scanPhoto } = useStore();
   const [photo, setPhoto] = useState(null);
+  const [photoFile, setPhotoFile] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [species, setSpecies] = useState("Unknown");
   const [markings, setMarkings] = useState("");
@@ -45,36 +53,72 @@ export default function Scanner() {
     }
     try {
       setPhoto(await fileToDataUrl(file));
+      setPhotoFile(file);
     } catch {
       setError("Could not read that image. Try another file.");
     }
   };
 
-  const startScan = () => {
-    if (!photo) {
+  const pickSample = async (pet) => {
+    const url = petPhoto(pet);
+    if (!url) return;
+    setError("");
+    setResults(null);
+    setPhase(-1);
+    try {
+      const file = url.startsWith("data:")
+        ? new File([await (await fetch(url)).blob()], "sample.jpg", { type: "image/jpeg" })
+        : await urlToFile(url);
+      setPhoto(url.startsWith("data:") ? url : await fileToDataUrl(file));
+      setPhotoFile(file);
+      setSpecies(pet.species);
+    } catch {
+      setError("Could not load that sample photo. Try uploading your own.");
+    }
+  };
+
+  const startScan = async () => {
+    if (!photo || !photoFile) {
       setError("Upload a photo first — the scanner needs something to compare.");
       return;
     }
     setError("");
     setResults(null);
     const stepMs = reducedMotion ? 60 : 850;
+    const startedAt = Date.now();
     PHASES.forEach((_, i) => {
       timers.current.push(window.setTimeout(() => setPhase(i), i * stepMs));
     });
-    timers.current.push(
-      window.setTimeout(() => {
-        const ranked = scorePets(photo, pets, { species, markings, location });
-        setResults(ranked);
-        setPhase(4);
-        logActivity(`Photo scan run (${ranked[0] ? `top match ${ranked[0].pet.id} at ${ranked[0].score}%` : "no profiles"})`, null);
-      }, PHASES.length * stepMs + (reducedMotion ? 0 : 400)),
-    );
+    try {
+      const data = await scanPhoto(photoFile, { species, markings, location });
+      const ranked = (data.matches || []).map((m) => ({
+        pet: m.animal,
+        score: Math.round(m.score),
+        band: m.band,
+        reasons: m.reasons || [],
+      }));
+      const elapsed = Date.now() - startedAt;
+      const remaining = Math.max(0, PHASES.length * stepMs + (reducedMotion ? 0 : 400) - elapsed);
+      timers.current.push(
+        window.setTimeout(() => {
+          setResults(ranked);
+          setPhase(4);
+          logActivity(`Photo scan run (${ranked[0] ? `top match ${petDisplayId(ranked[0].pet)} at ${ranked[0].score}%` : "no profiles"})`, null);
+        }, remaining),
+      );
+    } catch (err) {
+      timers.current.forEach(clearTimeout);
+      timers.current = [];
+      setPhase(-1);
+      setError(apiError(err, "The scan failed. Make sure the API server is running and try again."));
+    }
   };
 
   const reset = () => {
     timers.current.forEach(clearTimeout);
     timers.current = [];
     setPhoto(null);
+    setPhotoFile(null);
     setResults(null);
     setPhase(-1);
     setMarkings("");
@@ -84,12 +128,12 @@ export default function Scanner() {
 
   const scanning = phase >= 0 && phase < PHASES.length;
   const top = results?.[0];
-  const withPhotos = pets.filter((p) => p.photos?.front);
+  const withPhotos = pets.filter((p) => petPhoto(p));
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-10 sm:px-6">
       <p className="text-xs font-bold tracking-widest text-ember-600 uppercase">
-        AI identification · demo matcher
+        AI identification · SAM embeddings
       </p>
       <h1 className="font-display mt-2 text-4xl font-bold tracking-tight text-pine-950">
         Photo search scanner
@@ -182,14 +226,11 @@ export default function Scanner() {
                 {withPhotos.slice(0, 6).map((p) => (
                   <button
                     key={p.id}
-                    onClick={() => {
-                      setPhoto(p.photos.front);
-                      setSpecies(p.species);
-                    }}
+                    onClick={() => pickSample(p)}
                     className="shrink-0 cursor-pointer overflow-hidden rounded-xl border border-stone-200 hover:border-pine-700"
                     title={`Scan with ${p.name}'s photo`}
                   >
-                    <img src={p.photos.front} alt={p.name} className="h-16 w-16 object-cover" />
+                    <img src={petPhoto(p)} alt={p.name} className="h-16 w-16 object-cover" />
                   </button>
                 ))}
               </div>
@@ -205,14 +246,14 @@ export default function Scanner() {
                     Likely match · {top.score}% confidence
                   </p>
                   <div className="mt-2 flex flex-wrap items-center gap-4">
-                    {top.pet.photos?.front ? (
-                      <img src={top.pet.photos.front} alt="" className="h-16 w-16 rounded-xl object-cover" />
+                    {petPhoto(top.pet) ? (
+                      <img src={petPhoto(top.pet)} alt="" className="h-16 w-16 rounded-xl object-cover" />
                     ) : (
                       <PetAvatar pet={top.pet} className="h-16 w-16 rounded-xl [&_span:first-of-type]:text-2xl" />
                     )}
                     <div className="min-w-0 flex-1">
                       <p className="font-display text-2xl font-bold">
-                        {top.pet.name} <span className="font-mono text-sm font-normal text-stone-300">{top.pet.id}</span>
+                        {top.pet.name} <span className="font-mono text-sm font-normal text-stone-300">{petDisplayId(top.pet)}</span>
                       </p>
                       <p className="text-sm text-stone-300">
                         {top.pet.breed} · {top.pet.location}
@@ -259,8 +300,8 @@ export default function Scanner() {
                     key={pet.id}
                     className="flex gap-4 rounded-2xl border border-stone-200 bg-white p-4"
                   >
-                    {pet.photos?.front ? (
-                      <img src={pet.photos.front} alt="" className="h-20 w-20 shrink-0 rounded-xl object-cover" />
+                    {petPhoto(pet) ? (
+                      <img src={petPhoto(pet)} alt="" className="h-20 w-20 shrink-0 rounded-xl object-cover" />
                     ) : (
                       <PetAvatar pet={pet} className="h-20 w-20 shrink-0 rounded-xl [&_span:first-of-type]:text-3xl" />
                     )}
@@ -272,7 +313,7 @@ export default function Scanner() {
                         >
                           {pet.name}
                         </button>
-                        <span className="font-mono text-xs text-stone-400">{pet.id}</span>
+                        <span className="font-mono text-xs text-stone-400">{petDisplayId(pet)}</span>
                         <StatusPill status={pet.status} />
                       </div>
                       <p className="mt-0.5 truncate text-xs font-medium text-stone-500">
@@ -321,7 +362,7 @@ export default function Scanner() {
                   onChange={(e) => setSpecies(e.target.value)}
                   className="w-full cursor-pointer rounded-xl border border-stone-300 px-3 py-2.5 text-sm font-medium focus:border-pine-700 focus:outline-none"
                 >
-                  {["Unknown", "Dog", "Cat", "Bird", "Rabbit", "Other"].map((s) => (
+                  {["Unknown", ...SPECIES_OPTIONS].map((s) => (
                     <option key={s}>{s}</option>
                   ))}
                 </select>
@@ -374,8 +415,8 @@ export default function Scanner() {
               How matching works
             </h2>
             <ol className="mt-3 list-decimal space-y-2 pl-5 text-stone-600">
-              <li>Your photo never leaves the browser in this demo.</li>
-              <li>Coat, markings, species, and location signals are scored per profile.</li>
+              <li>Your photo is embedded by Meta AI SAM 3.1 on our secure server.</li>
+              <li>Cosine similarity ranks it against every registered profile.</li>
               <li>Lost pets and 4-angle reference sets rank higher.</li>
             </ol>
           </div>

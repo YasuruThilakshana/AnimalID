@@ -1,15 +1,19 @@
 import { useState } from "react";
 import { PetAvatar, ScanCode, StatusPill } from "../components/ui";
-import { timeAgo, useStore } from "../lib/store";
+import { apiError } from "../lib/api.js";
+import { petDisplayId, petPhoto, timeAgo, useStore } from "../lib/store";
 
 const ANGLE_LABELS = { front: "Front", left: "Left side", right: "Right side", mark: "Mark" };
 
 export default function PetProfile() {
-  const { route, navigate, pets, savePet, deletePet, currentUser, toast, logActivity } = useStore();
-  const pet = pets.find((p) => p.id === route.param);
+  const { route, navigate, pets, savePet, deletePet, reportSighting, currentUser, toast, logActivity } = useStore();
+  const pet = pets.find(
+    (p) => String(p.id) === String(route.param) || p.tagNumber === route.param,
+  );
   const [angle, setAngle] = useState("front");
   const [sighting, setSighting] = useState({ place: "", note: "" });
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   if (!pet) {
     return (
@@ -28,36 +32,53 @@ export default function PetProfile() {
     );
   }
 
-  const isOwner = currentUser?.email === pet.owner;
-  const photoAngles = Object.keys(pet.photos || {}).filter((k) => pet.photos[k]);
-  const currentPhoto = pet.photos?.[angle];
+  const isOwner = currentUser?.email === pet.ownerEmail;
+  const photoAngles = Object.keys(ANGLE_LABELS).filter((k) => petPhoto(pet, k));
+  const currentPhoto = petPhoto(pet, angle);
+  const displayId = petDisplayId(pet);
 
   const setStatus = async (status) => {
     const label = status === "lost" ? "Reported lost" : status === "found" ? "Listed as found" : "Marked safe at home";
-    await savePet({ ...pet, timeline: [...(pet.timeline || []), { t: Date.now(), text: label }] , status});
-    logActivity(`${pet.name} was ${status === "safe" ? "marked safe" : `reported ${status}`}`, pet.owner);
-    toast(status === "lost" ? `Lost alert broadcast for ${pet.name}.` : `${pet.name} marked as ${status}.`);
+    setBusy(true);
+    try {
+      await savePet({ ...pet, status, timeline: [...(pet.timeline || []), { t: Date.now(), text: label }] });
+      logActivity(`${pet.name} was ${status === "safe" ? "marked safe" : `reported ${status}`}`, pet.ownerEmail);
+      toast(status === "lost" ? `Lost alert broadcast for ${pet.name}.` : `${pet.name} marked as ${status}.`);
+    } catch (err) {
+      toast(apiError(err, "Could not update the status."), "warn");
+    } finally {
+      setBusy(false);
+    }
   };
 
   const remove = async () => {
-    await deletePet(pet.id);
-    logActivity(`${pet.name} (${pet.id}) was removed`, currentUser.email);
-    toast(`${pet.name}'s profile was deleted.`);
-    navigate("dashboard");
+    setBusy(true);
+    try {
+      await deletePet(pet.id);
+      logActivity(`${pet.name} (${displayId}) was removed`, currentUser.email);
+      toast(`${pet.name}'s profile was deleted.`);
+      navigate("dashboard");
+    } catch (err) {
+      toast(apiError(err, "Could not delete the profile."), "warn");
+    } finally {
+      setBusy(false);
+    }
   };
 
-  const reportSighting = async (e) => {
+  const submitSighting = async (e) => {
     e.preventDefault();
     if (sighting.place.trim().length < 3) return toast("Where did you see them? Add a place.", "warn");
-    const s = { t: Date.now(), place: sighting.place.trim(), note: sighting.note.trim() };
-    await savePet({
-      ...pet,
-      sightings: [...(pet.sightings || []), s],
-      timeline: [...(pet.timeline || []), { t: Date.now(), text: `Sighting reported at ${s.place}` }],
-    });
-    logActivity(`Sighting of ${pet.name} at ${s.place}`, currentUser?.email);
-    setSighting({ place: "", note: "" });
-    toast("Sighting reported. The owner has been notified.");
+    setBusy(true);
+    try {
+      await reportSighting(pet.id, sighting.place, sighting.note);
+      logActivity(`Sighting of ${pet.name} at ${sighting.place.trim()}`, currentUser?.email);
+      setSighting({ place: "", note: "" });
+      toast("Sighting reported. The owner has been notified.");
+    } catch (err) {
+      toast(apiError(err, "Could not report the sighting."), "warn");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -101,8 +122,8 @@ export default function PetProfile() {
                   angle === a ? "border-pine-900" : "border-transparent opacity-70 hover:opacity-100"
                 }`}
               >
-                {pet.photos?.[a] ? (
-                  <img src={pet.photos[a]} alt="" className="h-16 w-full object-cover sm:h-20" />
+                {petPhoto(pet, a) ? (
+                  <img src={petPhoto(pet, a)} alt="" className="h-16 w-full object-cover sm:h-20" />
                 ) : (
                   <span className="grid h-16 w-full place-items-center bg-stone-100 text-[11px] font-bold text-stone-400 sm:h-20">
                     {ANGLE_LABELS[a]}
@@ -127,11 +148,10 @@ export default function PetProfile() {
 
           <dl className="mt-6 grid gap-x-10 gap-y-4 rounded-2xl border border-stone-200 bg-white p-6 text-sm sm:grid-cols-2">
             {[
-              ["AnimalID", pet.id, true],
+              ["AnimalID", displayId, true],
               ["Color", pet.color + (pet.weight ? ` · ${pet.weight}` : "")],
               ["Location", pet.location],
-              ["Microchip", pet.microchip || "Not recorded", true],
-              ["Tag ID", pet.tagId || "Not recorded", true],
+              ["Tag number", pet.tagNumber || displayId, true],
               ["Vet clinic", pet.vet || "Not recorded"],
               ["Owner", `${pet.ownerName} · ${pet.contact}`],
             ].map(([k, v, mono]) => (
@@ -168,7 +188,7 @@ export default function PetProfile() {
               </ul>
             )}
 
-            <form id="sighting" onSubmit={reportSighting} className="mt-4 rounded-2xl bg-pine-50 p-5">
+            <form id="sighting" onSubmit={submitSighting} className="mt-4 rounded-2xl bg-pine-50 p-5">
               <h3 className="text-sm font-bold text-pine-950">Seen {pet.name}? Report it here</h3>
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <input
@@ -188,7 +208,8 @@ export default function PetProfile() {
               </div>
               <button
                 type="submit"
-                className="mt-3 cursor-pointer rounded-xl bg-pine-900 px-5 py-2.5 text-sm font-bold text-white hover:bg-pine-800"
+                disabled={busy}
+                className="mt-3 cursor-pointer rounded-xl bg-pine-900 px-5 py-2.5 text-sm font-bold text-white hover:bg-pine-800 disabled:opacity-60"
               >
                 Submit sighting
               </button>
@@ -217,9 +238,9 @@ export default function PetProfile() {
               Scannable AnimalID
             </p>
             <div className="mt-3 flex items-center gap-4">
-              <ScanCode seed={pet.id} className="h-24 w-24 shrink-0 rounded-lg border border-stone-200" />
+              <ScanCode seed={displayId} className="h-24 w-24 shrink-0 rounded-lg border border-stone-200" />
               <div>
-                <p className="font-mono text-lg font-bold text-pine-950">{pet.id}</p>
+                <p className="font-mono text-lg font-bold text-pine-950">{displayId}</p>
                 <button
                   onClick={() => window.print()}
                   className="mt-2 cursor-pointer rounded-lg bg-stone-100 px-3 py-1.5 text-xs font-bold text-pine-900 hover:bg-stone-200"
@@ -241,7 +262,7 @@ export default function PetProfile() {
             <p className="mt-2 text-sm font-bold text-pine-950">{pet.ownerName}</p>
             <p className="text-sm text-stone-600">{pet.contact}</p>
             <a
-              href={`tel:${pet.contact.replace(/[^+\d]/g, "")}`}
+              href={`tel:${String(pet.contact || "").replace(/[^+\d]/g, "")}`}
               className="mt-3 block cursor-pointer rounded-xl bg-ember-500 px-4 py-2.5 text-center text-sm font-bold text-white hover:bg-ember-600"
             >
               Call about {pet.name}
@@ -263,7 +284,8 @@ export default function PetProfile() {
                 {pet.status !== "lost" ? (
                   <button
                     onClick={() => setStatus("lost")}
-                    className="w-full cursor-pointer rounded-xl bg-ember-500 px-4 py-2.5 text-sm font-bold hover:bg-ember-600"
+                    disabled={busy}
+                    className="w-full cursor-pointer rounded-xl bg-ember-500 px-4 py-2.5 text-sm font-bold hover:bg-ember-600 disabled:opacity-60"
                   >
                     Report as lost
                   </button>
@@ -278,7 +300,8 @@ export default function PetProfile() {
                 {pet.status === "lost" && (
                   <button
                     onClick={() => setStatus("safe")}
-                    className="w-full cursor-pointer rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-pine-950 hover:bg-emerald-400"
+                    disabled={busy}
+                    className="w-full cursor-pointer rounded-xl bg-emerald-500 px-4 py-2.5 text-sm font-bold text-pine-950 hover:bg-emerald-400 disabled:opacity-60"
                   >
                     Mark as found / safe
                   </button>
@@ -286,7 +309,8 @@ export default function PetProfile() {
                 {pet.status !== "found" && pet.status !== "lost" && (
                   <button
                     onClick={() => setStatus("found")}
-                    className="w-full cursor-pointer rounded-xl bg-white/10 px-4 py-2.5 text-sm font-bold hover:bg-white/20"
+                    disabled={busy}
+                    className="w-full cursor-pointer rounded-xl bg-white/10 px-4 py-2.5 text-sm font-bold hover:bg-white/20 disabled:opacity-60"
                   >
                     List as found stray
                   </button>
@@ -305,7 +329,8 @@ export default function PetProfile() {
                     <div className="mt-3 flex gap-2">
                       <button
                         onClick={remove}
-                        className="flex-1 cursor-pointer rounded-lg bg-ember-600 px-3 py-2 text-xs font-bold hover:bg-ember-500"
+                        disabled={busy}
+                        className="flex-1 cursor-pointer rounded-lg bg-ember-600 px-3 py-2 text-xs font-bold hover:bg-ember-500 disabled:opacity-60"
                       >
                         Yes, delete
                       </button>

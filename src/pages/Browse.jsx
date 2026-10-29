@@ -1,10 +1,10 @@
 import { useMemo, useState } from "react";
 import PetCard from "../components/PetCard";
 import { EmptyState } from "../components/ui";
-import { useStore } from "../lib/store";
+import { SPECIES_OPTIONS, useStore } from "../lib/store";
 
 export default function Browse() {
-  const { pets, route, navigate } = useStore();
+  const { pets, petsLoading, petsError, refreshPets, route, navigate } = useStore();
   const [q, setQ] = useState(route.query.q || "");
   const [species, setSpecies] = useState(route.query.species || "Any species");
   const [status, setStatus] = useState(route.query.status || "any");
@@ -20,7 +20,8 @@ export default function Browse() {
       if (st && st !== "any" && p.status !== st) return false;
       if (loc && !p.location.toLowerCase().includes(loc)) return false;
       if (!needle) return true;
-      const hay = [p.id, p.name, p.breed, p.color, p.marks, p.microchip, p.tagId, p.location]
+      const hay = [p.id, p.tagNumber, p.name, p.breed, p.color, p.marks, p.location]
+        .filter(Boolean)
         .join(" ")
         .toLowerCase();
       return needle.split(/\s+/).every((w) => hay.includes(w));
@@ -51,7 +52,7 @@ export default function Browse() {
     <main className="mx-auto max-w-6xl px-4 py-10 sm:px-6">
       <h1 className="font-display text-4xl font-bold tracking-tight text-pine-950">Find a pet</h1>
       <p className="mt-2 max-w-xl text-sm text-stone-600">
-        Search every registered animal by ID, chip, tag, description, or location. No account
+        Search every registered animal by ID, tag, description, or location. No account
         needed — helping is open to everyone.
       </p>
 
@@ -60,7 +61,7 @@ export default function Browse() {
           <input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="ID, breed, color, markings, chip…"
+            placeholder="ID, breed, color, markings, tag…"
             className="rounded-xl border border-stone-200 bg-white px-4 py-2.5 text-sm focus:border-pine-700 focus:outline-none"
             aria-label="Search keywords"
           />
@@ -70,7 +71,7 @@ export default function Browse() {
             className="cursor-pointer rounded-xl border border-stone-200 bg-white px-3 py-2.5 text-sm font-medium focus:border-pine-700 focus:outline-none"
             aria-label="Species"
           >
-            {["Any species", "Dog", "Cat", "Bird", "Rabbit", "Other"].map((s) => (
+            {["Any species", ...SPECIES_OPTIONS].map((s) => (
               <option key={s}>{s}</option>
             ))}
           </select>
@@ -115,6 +116,23 @@ export default function Browse() {
         </div>
       </form>
 
+      {petsLoading && (
+        <p className="mt-8 rounded-2xl bg-stone-100 px-6 py-6 text-center text-sm font-semibold text-stone-500" role="status">
+          Loading registered pets from the database…
+        </p>
+      )}
+      {!petsLoading && petsError && (
+        <div className="mt-8 rounded-2xl border border-ember-100 bg-ember-50 px-6 py-6 text-center">
+          <p className="text-sm font-semibold text-ember-700">{petsError}</p>
+          <button
+            onClick={refreshPets}
+            className="mt-3 cursor-pointer rounded-xl bg-pine-900 px-5 py-2.5 text-sm font-semibold text-white hover:bg-pine-800"
+          >
+            Try again
+          </button>
+        </div>
+      )}
+
       <div className="mt-8">
         {results.length ? (
           <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
@@ -122,10 +140,10 @@ export default function Browse() {
               <PetCard key={p.id} pet={p} />
             ))}
           </div>
-        ) : (
+        ) : !petsLoading && !petsError ? (
           <EmptyState
             title="No pets match that search"
-            body="Try fewer keywords, check the spelling of the ID, or widen the location. IDs look like AID-10482."
+            body="Try fewer keywords, check the spelling of the ID, or widen the location. IDs look like TAG-001-0001."
             action={
               <button
                 onClick={clear}
@@ -135,7 +153,7 @@ export default function Browse() {
               </button>
             }
           />
-        )}
+        ) : null}
       </div>
     </main>
   );

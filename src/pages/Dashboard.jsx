@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import PetCard from "../components/PetCard";
 import { EmptyState, PetAvatar } from "../components/ui";
-import { timeAgo, useStore } from "../lib/store";
+import { petPhoto, timeAgo, useStore } from "../lib/store";
 
 export default function Dashboard() {
   const { currentUser, authReady, navigate, pets, activity } = useStore();
@@ -12,11 +12,11 @@ export default function Dashboard() {
 
   if (!authReady || !currentUser) return null;
 
-  const mine = pets.filter((p) => p.owner === currentUser.email);
+  const mine = pets.filter((p) => p.ownerEmail === currentUser.email);
   const lost = mine.filter((p) => p.status === "lost");
   const sightings = mine.reduce((n, p) => n + (p.sightings?.length || 0), 0);
   const myActivity = activity.filter((a) => !a.email || a.email === currentUser.email).slice(0, 6);
-  const nearbyLost = pets.filter((p) => p.status === "lost" && p.owner !== currentUser.email).slice(0, 4);
+  const nearbyLost = pets.filter((p) => p.status === "lost" && p.ownerEmail !== currentUser.email).slice(0, 4);
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-10 sm:px-6">
@@ -43,7 +43,7 @@ export default function Dashboard() {
           [`${mine.length}`, "pets registered"],
           [`${lost.length}`, "currently lost"],
           [`${sightings}`, "sightings received"],
-          [`${mine.filter((p) => Object.values(p.photos || {}).some(Boolean)).length}/${mine.length}`, "with photos"],
+          [`${mine.filter((p) => petPhoto(p)).length}/${mine.length}`, "with photos"],
         ].map(([n, label]) => (
           <div key={label} className="rounded-2xl border border-stone-200 bg-white p-5">
             <p className="font-display text-3xl font-bold text-pine-950">{n}</p>
@@ -125,8 +125,8 @@ export default function Dashboard() {
                       onClick={() => navigate("pet", p.id)}
                       className="flex w-full cursor-pointer items-center gap-3 rounded-xl bg-white/10 p-2.5 text-left hover:bg-white/15"
                     >
-                      {p.photos?.front ? (
-                        <img src={p.photos.front} alt="" className="h-10 w-10 rounded-lg object-cover" />
+                      {petPhoto(p) ? (
+                        <img src={petPhoto(p)} alt="" className="h-10 w-10 rounded-lg object-cover" />
                       ) : (
                         <PetAvatar pet={p} className="h-10 w-10 shrink-0 rounded-lg [&_span:first-of-type]:text-base" />
                       )}
