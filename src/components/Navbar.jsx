@@ -52,8 +52,8 @@ export default function Navbar() {
                 Hi, {currentUser.name.split(" ")[0]}
               </button>
               <button
-                onClick={() => {
-                  signOut();
+                onClick={async () => {
+                  await signOut();
                   toast("Signed out. See you soon!");
                   go("home");
                 }}
@@ -110,8 +110,8 @@ export default function Navbar() {
           <div className="mt-2 flex gap-2 border-t border-stone-200 pt-3">
             {currentUser ? (
               <button
-                onClick={() => {
-                  signOut();
+                onClick={async () => {
+                  await signOut();
                   go("home");
                 }}
                 className="flex-1 cursor-pointer rounded-lg border border-stone-300 px-3 py-2.5 text-sm font-semibold"

@@ -4,13 +4,13 @@ import { EmptyState, PetAvatar } from "../components/ui";
 import { timeAgo, useStore } from "../lib/store";
 
 export default function Dashboard() {
-  const { currentUser, navigate, pets, activity } = useStore();
+  const { currentUser, authReady, navigate, pets, activity } = useStore();
 
   useEffect(() => {
-    if (!currentUser) navigate("auth", null, { mode: "in" });
-  }, [currentUser, navigate]);
+    if (authReady && !currentUser) navigate("auth", null, { mode: "in" });
+  }, [authReady, currentUser, navigate]);
 
-  if (!currentUser) return null;
+  if (!authReady || !currentUser) return null;
 
   const mine = pets.filter((p) => p.owner === currentUser.email);
   const lost = mine.filter((p) => p.status === "lost");

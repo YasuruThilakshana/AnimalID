@@ -1,4 +1,13 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  addDoc,
+  collection,
+  onSnapshot,
+  query,
+  serverTimestamp,
+  where,
+} from "firebase/firestore";
+import { db } from "../firebase.js";
 import { PetAvatar, ScanCode } from "../components/ui";
 import { timeAgo, useStore } from "../lib/store";
 
@@ -179,6 +188,27 @@ function PosterModal({ pet, onClose }) {
   );
 }
 
+/** Map a Firestore `alerts` doc onto the pet-card shape used below. */
+function alertToPet(a) {
+  return {
+    id: a.petId,
+    name: a.name || "Unknown pet",
+    species: a.species || "Other",
+    breed: a.breed || "Unknown",
+    color: a.color || "",
+    gender: "",
+    age: "",
+    location: a.location || "",
+    contact: a.contact || "",
+    marks: a.marks || "",
+    status: "lost",
+    createdAt: a.lostAt || Date.now(),
+    photos: a.photo ? { front: a.photo } : {},
+    sightings: [],
+    timeline: [{ t: a.lostAt || Date.now(), text: "Reported lost" }],
+  };
+}
+
 export default function Alerts() {
   const { pets, route, navigate, toast } = useStore();
   const q = route.query;
@@ -187,8 +217,55 @@ export default function Alerts() {
   const [recency, setRecency] = useState(q.recency || "any");
   const [keyword, setKeyword] = useState(q.q || "");
   const [email, setEmail] = useState("");
+  // Live Firestore state. cloudLost === null means "not loaded / offline",
+  // in which case the hub falls back to the store's pet list.
+  const [cloudLost, setCloudLost] = useState(null);
+  const [cloudAlerts, setCloudAlerts] = useState([]);
 
-  const lost = useMemo(() => pets.filter((p) => p.status === "lost"), [pets]);
+  useEffect(() => {
+    if (!db) return;
+    const unsubs = [
+      onSnapshot(
+        query(collection(db, "pets"), where("status", "==", "lost")),
+        (snap) => setCloudLost(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+        () => setCloudLost(null),
+      ),
+      onSnapshot(
+        query(collection(db, "alerts"), where("status", "==", "lost")),
+        (snap) => setCloudAlerts(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+        () => setCloudAlerts([]),
+      ),
+    ];
+    return () => unsubs.forEach((u) => u());
+  }, []);
+
+  const storeLost = useMemo(() => pets.filter((p) => p.status === "lost"), [pets]);
+
+  const lost = useMemo(() => {
+    const base = cloudLost ?? storeLost;
+    const known = new Set(base.map((p) => p.id));
+    const extras = cloudAlerts
+      .filter((a) => a.petId && !known.has(a.petId))
+      .map(alertToPet);
+    return [...base, ...extras];
+  }, [cloudLost, storeLost, cloudAlerts]);
+
+  const subscribe = async (e) => {
+    e.preventDefault();
+    if (!email.includes("@")) return toast("Enter a valid email to subscribe.", "warn");
+    if (db) {
+      try {
+        await addDoc(collection(db, "alertSubscriptions"), {
+          email: email.trim().toLowerCase(),
+          createdAt: serverTimestamp(),
+        });
+      } catch {
+        return toast("Couldn't save your subscription. Please try again.", "warn");
+      }
+    }
+    setEmail("");
+    toast("Subscribed! You'll get alerts for your area.");
+  };
 
   const results = useMemo(() => {
     const loc = (q.location || "").toLowerCase();
@@ -231,6 +308,9 @@ export default function Alerts() {
         <div>
           <p className="text-xs font-bold tracking-widest text-ember-600 uppercase">
             {lost.length} active alert{lost.length === 1 ? "" : "s"}
+            <span className="ml-2 font-semibold normal-case text-stone-400">
+              · {db ? "live from Firestore" : "demo data — add Firebase config for live alerts"}
+            </span>
           </p>
           <h1 className="font-display mt-1 text-4xl font-bold tracking-tight text-pine-950">
             Missing pet alerts hub
@@ -364,15 +444,7 @@ export default function Alerts() {
             A text the moment a pet goes missing within 10 miles of you.
           </p>
         </div>
-        <form
-          className="flex w-full gap-2 sm:w-auto"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (!email.includes("@")) return toast("Enter a valid email to subscribe.", "warn");
-            setEmail("");
-            toast("Subscribed! You'll get alerts for your area.");
-          }}
-        >
+        <form className="flex w-full gap-2 sm:w-auto" onSubmit={subscribe}>
           <input
             type="email"
             value={email}

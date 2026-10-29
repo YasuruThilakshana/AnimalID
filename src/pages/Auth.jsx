@@ -1,20 +1,48 @@
 import { useEffect, useState } from "react";
+import {
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  updateProfile,
+} from "firebase/auth";
+import { auth } from "../firebase.js";
 import { ScanCode } from "../components/ui";
 import { useStore } from "../lib/store";
 
+function friendlyAuthError(code) {
+  switch (code) {
+    case "auth/email-already-in-use":
+      return "An account with this email already exists. Try signing in instead.";
+    case "auth/invalid-email":
+      return "Please enter a valid email address.";
+    case "auth/weak-password":
+      return "Password must be at least 6 characters.";
+    case "auth/user-not-found":
+    case "auth/wrong-password":
+    case "auth/invalid-credential":
+      return "Incorrect email or password.";
+    case "auth/too-many-requests":
+      return "Too many attempts. Please wait a moment and try again.";
+    case "auth/network-request-failed":
+      return "Network error. Check your connection and try again.";
+    default:
+      return "Something went wrong. Please try again.";
+  }
+}
+
 export default function Auth() {
-  const { route, navigate, signUp, signIn, signInDemo, currentUser, toast } = useStore();
+  const { route, navigate, signUp, signIn, signInDemo, currentUser, authReady, toast } = useStore();
   const [mode, setMode] = useState(route.query.mode === "in" ? "in" : "up");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (currentUser) navigate("dashboard");
-  }, [currentUser, navigate]);
+    if (authReady && currentUser) navigate("dashboard");
+  }, [authReady, currentUser, navigate]);
 
-  const submit = (e) => {
+  const submit = async (e) => {
     e.preventDefault();
     setError("");
     if (mode === "up" && name.trim().length < 2) return setError("Please enter your full name.");
@@ -22,11 +50,35 @@ export default function Auth() {
       return setError("Please enter a valid email address.");
     if (password.length < 6) return setError("Password must be at least 6 characters.");
 
-    const res =
-      mode === "up" ? signUp(name, email, password) : signIn(email, password);
-    if (res.error) return setError(res.error);
-    toast(mode === "up" ? `Welcome to AnimalID, ${res.user.name.split(" ")[0]}!` : `Welcome back, ${res.user.name.split(" ")[0]}!`);
-    navigate(route.query.next === "register" ? "register" : "dashboard");
+    const next = () => navigate(route.query.next === "register" ? "register" : "dashboard");
+
+    // Offline demo mode: fall back to local accounts.
+    if (!auth) {
+      const res =
+        mode === "up" ? signUp(name, email, password) : signIn(email, password);
+      if (res.error) return setError(res.error);
+      toast(mode === "up" ? `Welcome to AnimalID, ${res.user.name.split(" ")[0]}!` : `Welcome back, ${res.user.name.split(" ")[0]}!`);
+      next();
+      return;
+    }
+
+    setBusy(true);
+    try {
+      if (mode === "up") {
+        const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+        await updateProfile(cred.user, { displayName: name.trim() });
+        toast(`Welcome to AnimalID, ${name.trim().split(" ")[0]}!`);
+      } else {
+        const cred = await signInWithEmailAndPassword(auth, email.trim(), password);
+        const first = (cred.user.displayName || cred.user.email || "friend").split(" ")[0];
+        toast(`Welcome back, ${first}!`);
+      }
+      next();
+    } catch (err) {
+      setError(friendlyAuthError(err?.code));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const inputCls =
@@ -158,9 +210,16 @@ export default function Auth() {
 
             <button
               type="submit"
-              className="w-full cursor-pointer rounded-xl bg-ember-500 px-4 py-3 text-sm font-bold text-white hover:bg-ember-600"
+              disabled={busy}
+              className="w-full cursor-pointer rounded-xl bg-ember-500 px-4 py-3 text-sm font-bold text-white hover:bg-ember-600 disabled:cursor-default disabled:opacity-60"
             >
-              {mode === "up" ? "Create free account" : "Sign in"}
+              {busy
+                ? mode === "up"
+                  ? "Creating account…"
+                  : "Signing in…"
+                : mode === "up"
+                  ? "Create free account"
+                  : "Sign in"}
             </button>
           </form>
 

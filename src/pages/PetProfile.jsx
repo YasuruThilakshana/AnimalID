@@ -32,25 +32,25 @@ export default function PetProfile() {
   const photoAngles = Object.keys(pet.photos || {}).filter((k) => pet.photos[k]);
   const currentPhoto = pet.photos?.[angle];
 
-  const setStatus = (status) => {
+  const setStatus = async (status) => {
     const label = status === "lost" ? "Reported lost" : status === "found" ? "Listed as found" : "Marked safe at home";
-    savePet({ ...pet, timeline: [...(pet.timeline || []), { t: Date.now(), text: label }] , status});
+    await savePet({ ...pet, timeline: [...(pet.timeline || []), { t: Date.now(), text: label }] , status});
     logActivity(`${pet.name} was ${status === "safe" ? "marked safe" : `reported ${status}`}`, pet.owner);
     toast(status === "lost" ? `Lost alert broadcast for ${pet.name}.` : `${pet.name} marked as ${status}.`);
   };
 
-  const remove = () => {
-    deletePet(pet.id);
+  const remove = async () => {
+    await deletePet(pet.id);
     logActivity(`${pet.name} (${pet.id}) was removed`, currentUser.email);
     toast(`${pet.name}'s profile was deleted.`);
     navigate("dashboard");
   };
 
-  const reportSighting = (e) => {
+  const reportSighting = async (e) => {
     e.preventDefault();
     if (sighting.place.trim().length < 3) return toast("Where did you see them? Add a place.", "warn");
     const s = { t: Date.now(), place: sighting.place.trim(), note: sighting.note.trim() };
-    savePet({
+    await savePet({
       ...pet,
       sightings: [...(pet.sightings || []), s],
       timeline: [...(pet.timeline || []), { t: Date.now(), text: `Sighting reported at ${s.place}` }],

@@ -6,6 +6,17 @@ import {
   useMemo,
   useState,
 } from "react";
+import { signOut as firebaseSignOut, onAuthStateChanged } from "firebase/auth";
+import {
+  collection,
+  deleteDoc,
+  doc,
+  onSnapshot,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+} from "firebase/firestore";
+import { auth, db } from "../firebase.js";
 
 const LS_USERS = "animalid.users";
 const LS_SESSION = "animalid.session";
@@ -241,6 +252,58 @@ const StoreContext = createContext(null);
 
 let toastSeq = 1;
 
+/** Map a Firebase Auth user onto this app's { name, email, joined } shape. */
+function mapFirebaseUser(user) {
+  if (!user) return null;
+  const email = (user.email || "").toLowerCase();
+  return {
+    uid: user.uid,
+    email,
+    name: user.displayName || (email ? email.split("@")[0] : "Pet Owner"),
+    joined: user.metadata?.creationTime
+      ? new Date(user.metadata.creationTime).getTime()
+      : Date.now(),
+  };
+}
+
+/**
+ * Mirror a pet's lost status into the `alerts` collection so the Lost & Found
+ * hub can query missing-pet alerts directly. The front photo is stored as an
+ * inline Base64 data URL — no Firebase Storage needed.
+ */
+async function mirrorLostAlert(pet) {
+  if (!db) return;
+  const ref = doc(db, "alerts", pet.id);
+  if (pet.status === "lost") {
+    await setDoc(
+      ref,
+      {
+        petId: pet.id,
+        name: pet.name,
+        species: pet.species,
+        breed: pet.breed,
+        color: pet.color,
+        location: pet.location,
+        contact: pet.contact,
+        owner: pet.owner,
+        ownerName: pet.ownerName,
+        photo: pet.photos?.front || null,
+        marks: pet.marks || "",
+        status: "lost",
+        lostAt: Date.now(),
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
+  } else {
+    try {
+      await updateDoc(ref, { status: "resolved", updatedAt: serverTimestamp() });
+    } catch {
+      /* no alert doc to resolve — nothing to do */
+    }
+  }
+}
+
 export function StoreProvider({ children }) {
   const [route, setRoute] = useState(parseHash);
   const [users, setUsers] = useState(() => read(LS_USERS, []));
@@ -254,6 +317,8 @@ export function StoreProvider({ children }) {
   });
   const [activity, setActivity] = useState(() => read(LS_ACTIVITY, []));
   const [toasts, setToasts] = useState([]);
+  const [firebaseUser, setFirebaseUser] = useState(null);
+  const [authReady, setAuthReady] = useState(!auth);
 
   useEffect(() => {
     const onHash = () => {
@@ -268,6 +333,32 @@ export function StoreProvider({ children }) {
   useEffect(() => write(LS_PETS, pets), [pets]);
   useEffect(() => write(LS_ACTIVITY, activity.slice(0, 80)), [activity]);
   useEffect(() => write(LS_SESSION, session), [session]);
+
+  // Firebase Auth session → app user. No-ops in offline demo mode.
+  useEffect(() => {
+    if (!auth) return;
+    return onAuthStateChanged(auth, (user) => {
+      setFirebaseUser(mapFirebaseUser(user));
+      setAuthReady(true);
+    });
+  }, []);
+
+  // Firestore `pets` collection → live pet list. Keeps local demo data until
+  // the collection actually holds documents, so a fresh project still demos.
+  useEffect(() => {
+    if (!db) return;
+    return onSnapshot(
+      collection(db, "pets"),
+      (snap) => {
+        if (snap.empty) return;
+        const docs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+        setPets(docs);
+      },
+      (err) => {
+        console.warn("[pets] Firestore subscription failed, using local data:", err);
+      },
+    );
+  }, []);
 
   const navigate = useCallback((name, param, query) => {
     const hash = buildHash(name, param, query);
@@ -291,9 +382,11 @@ export function StoreProvider({ children }) {
     setActivity((prev) => [{ t: Date.now(), text, email: email || null }, ...prev].slice(0, 80));
   }, []);
 
+  // Firebase Auth user wins when signed in; otherwise fall back to the
+  // local (offline/demo) session.
   const currentUser = useMemo(
-    () => users.find((u) => u.email === session?.email) || null,
-    [users, session],
+    () => firebaseUser || users.find((u) => u.email === session?.email) || null,
+    [firebaseUser, users, session],
   );
 
   const signUp = useCallback(
@@ -332,7 +425,17 @@ export function StoreProvider({ children }) {
     logActivity("Demo Owner signed in", email);
   }, [logActivity]);
 
-  const signOut = useCallback(() => setSession(null), []);
+  const signOut = useCallback(async () => {
+    setSession(null);
+    setFirebaseUser(null);
+    if (auth) {
+      try {
+        await firebaseSignOut(auth);
+      } catch (err) {
+        console.warn("[auth] Firebase sign-out failed:", err);
+      }
+    }
+  }, []);
 
   const nextId = useCallback(() => {
     const nums = pets.map((p) => Number(String(p.id).replace(/\D/g, "")) || 0);
@@ -340,8 +443,10 @@ export function StoreProvider({ children }) {
     return `AID-${n}`;
   }, [pets]);
 
+  // Upsert locally, then persist to Firestore when configured.
+  // Pass { skipRemote: true } when the caller already wrote the document.
   const savePet = useCallback(
-    (pet) => {
+    async (pet, opts = {}) => {
       setPets((prev) => {
         const i = prev.findIndex((p) => p.id === pet.id);
         if (i >= 0) {
@@ -351,13 +456,41 @@ export function StoreProvider({ children }) {
         }
         return [pet, ...prev];
       });
+      if (opts.skipRemote || !db) return pet;
+      try {
+        await setDoc(
+          doc(db, "pets", pet.id),
+          { ...pet, updatedAt: serverTimestamp() },
+          { merge: true },
+        );
+        await mirrorLostAlert(pet);
+      } catch (err) {
+        console.warn("[pets] Firestore write failed:", err);
+        toast("Saved on this device, but cloud sync failed.", "warn");
+      }
+      return pet;
     },
-    [setPets],
+    [toast],
   );
 
-  const deletePet = useCallback((id) => {
-    setPets((prev) => prev.filter((p) => p.id !== id));
-  }, []);
+  const deletePet = useCallback(
+    async (id) => {
+      setPets((prev) => prev.filter((p) => p.id !== id));
+      if (!db) return;
+      try {
+        await deleteDoc(doc(db, "pets", id));
+        try {
+          await deleteDoc(doc(db, "alerts", id));
+        } catch {
+          /* no alert doc — nothing to do */
+        }
+      } catch (err) {
+        console.warn("[pets] Firestore delete failed:", err);
+        toast("Removed on this device, but cloud sync failed.", "warn");
+      }
+    },
+    [toast],
+  );
 
   const value = useMemo(
     () => ({
@@ -367,6 +500,8 @@ export function StoreProvider({ children }) {
       toast,
       users,
       currentUser,
+      authReady,
+      firebaseReady: Boolean(db),
       signUp,
       signIn,
       signInDemo,
@@ -385,6 +520,7 @@ export function StoreProvider({ children }) {
       toast,
       users,
       currentUser,
+      authReady,
       signUp,
       signIn,
       signInDemo,

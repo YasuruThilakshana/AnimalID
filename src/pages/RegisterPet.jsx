@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { doc, serverTimestamp, setDoc } from "firebase/firestore";
+import { db } from "../firebase.js";
 import { ScanCode, StatusPill } from "../components/ui";
 import { useStore } from "../lib/store";
 
@@ -70,7 +72,7 @@ const inputCls =
   "w-full rounded-xl border border-stone-300 bg-white px-4 py-2.5 text-sm focus:border-pine-700 focus:outline-none";
 
 export default function RegisterPet() {
-  const { currentUser, navigate, savePet, pets, nextId, toast, logActivity, route } = useStore();
+  const { currentUser, authReady, navigate, savePet, pets, nextId, toast, logActivity, route } = useStore();
   const editId = route.query.edit || null;
   const editing = useMemo(
     () => (editId ? pets.find((p) => p.id === editId) : null),
@@ -81,10 +83,11 @@ export default function RegisterPet() {
   const [form, setForm] = useState(EMPTY);
   const [errors, setErrors] = useState({});
   const [done, setDone] = useState(null);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    if (!currentUser) navigate("auth", null, { mode: "up", next: "register" });
-  }, [currentUser, navigate]);
+    if (authReady && !currentUser) navigate("auth", null, { mode: "up", next: "register" });
+  }, [authReady, currentUser, navigate]);
 
   useEffect(() => {
     if (editing) {
@@ -125,7 +128,7 @@ export default function RegisterPet() {
     }
   }, [form, currentUser, editing]);
 
-  if (!currentUser) return null;
+  if (!authReady || !currentUser) return null;
 
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }));
@@ -175,12 +178,32 @@ export default function RegisterPet() {
     }
   };
 
-  const submit = () => {
+  // Persist a pet profile to the Firestore `pets` collection. Photos are
+  // Base64 data URLs produced by downscale(), stored inline in the document —
+  // no Firebase Storage bucket required. Returns true when the cloud write
+  // succeeded (or was skipped in offline mode).
+  const persistPet = async (pet) => {
+    if (!db) return true;
+    try {
+      await setDoc(
+        doc(db, "pets", pet.id),
+        { ...pet, updatedAt: serverTimestamp() },
+        { merge: true },
+      );
+      return true;
+    } catch (err) {
+      console.warn("[pets] Firestore write failed:", err);
+      return false;
+    }
+  };
+
+  const submit = async () => {
     if (!validate(0) || !validate(1) || !validate(2)) {
       setStep(0);
       toast("A few required fields need attention.", "warn");
       return;
     }
+    setSaving(true);
     const now = Date.now();
     if (editing) {
       const updated = {
@@ -189,9 +212,14 @@ export default function RegisterPet() {
         name: form.name.trim(),
         timeline: [...(editing.timeline || []), { t: now, text: "Profile details updated" }],
       };
-      savePet(updated);
+      const synced = await persistPet(updated);
+      await savePet(updated, { skipRemote: true });
       logActivity(`${updated.name}'s profile was updated`, currentUser.email);
-      toast(`${updated.name}'s profile is up to date.`);
+      toast(
+        synced ? `${updated.name}'s profile is up to date.` : "Saved on this device, but cloud sync failed.",
+        synced ? "ok" : "warn",
+      );
+      setSaving(false);
       navigate("pet", updated.id);
       return;
     }
@@ -201,18 +229,22 @@ export default function RegisterPet() {
       name: form.name.trim(),
       status: "safe",
       owner: currentUser.email,
+      ownerUid: currentUser.uid || null,
       ownerName: currentUser.name,
       createdAt: now,
       sightings: [],
       timeline: [{ t: now, text: "Registered on AnimalID" }],
     };
-    savePet(pet);
+    const synced = await persistPet(pet);
+    await savePet(pet, { skipRemote: true });
     logActivity(`${pet.name} was registered (${pet.id})`, currentUser.email);
     try {
       localStorage.removeItem(DRAFT_KEY);
     } catch {
       /* noop */
     }
+    setSaving(false);
+    if (!synced) toast("Registered on this device, but cloud sync failed.", "warn");
     setDone(pet);
   };
 
@@ -505,9 +537,10 @@ export default function RegisterPet() {
             ) : (
               <button
                 onClick={submit}
-                className="cursor-pointer rounded-xl bg-ember-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-ember-600"
+                disabled={saving}
+                className="cursor-pointer rounded-xl bg-ember-500 px-6 py-2.5 text-sm font-bold text-white hover:bg-ember-600 disabled:cursor-default disabled:opacity-60"
               >
-                {editing ? "Save changes" : "Complete registration"}
+                {saving ? "Saving…" : editing ? "Save changes" : "Complete registration"}
               </button>
             )}
           </div>
