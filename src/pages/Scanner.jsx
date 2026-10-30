@@ -5,10 +5,10 @@ import { fileToDataUrl } from "../lib/matcher";
 import { petDisplayId, petPhoto, SPECIES_OPTIONS, useStore } from "../lib/store";
 
 const PHASES = [
-  "Detecting animal in photo…",
-  "Generating embedding with SAM 3.1…",
+  "Isolating the animal from the background…",
+  "Extracting facial and marking features with SAM 3.1…",
   "Comparing against registered profiles…",
-  "Ranking matches…",
+  "Ranking high-confidence matches…",
 ];
 
 const BAND_STYLE = {
@@ -16,6 +16,20 @@ const BAND_STYLE = {
   Medium: "bg-amber-400 text-pine-950",
   Low: "bg-stone-200 text-stone-600",
 };
+
+/** Format a 0–100 similarity score with one decimal (e.g. 92.4%). */
+function formatScore(score) {
+  const n = Number(score);
+  return Number.isFinite(n) ? n.toFixed(1) : "0.0";
+}
+
+/** Confidence wording for a match score: "98% High Match", "65% Moderate Match". */
+function confidenceLabel(score) {
+  if (score >= 85) return "High Match";
+  if (score >= 65) return "Moderate Match";
+  if (score >= 50) return "Possible Match";
+  return "Low Match";
+}
 
 async function urlToFile(url, name = "sample.jpg") {
   const res = await fetch(url);
@@ -33,6 +47,7 @@ export default function Scanner() {
   const [location, setLocation] = useState("");
   const [phase, setPhase] = useState(-1); // -1 idle, 0..3 scanning, 4 done
   const [results, setResults] = useState(null);
+  const [meta, setMeta] = useState(null); // { totalCompared, staleEmbeddings, withoutEmbeddings, threshold, engine, segmentation, detectedSpecies }
   const [error, setError] = useState("");
   const timers = useRef([]);
 
@@ -45,6 +60,7 @@ export default function Scanner() {
   const pickFile = async (file) => {
     setError("");
     setResults(null);
+    setMeta(null);
     setPhase(-1);
     if (!file) return;
     if (!file.type.startsWith("image/")) {
@@ -64,6 +80,7 @@ export default function Scanner() {
     if (!url) return;
     setError("");
     setResults(null);
+    setMeta(null);
     setPhase(-1);
     try {
       const file = url.startsWith("data:")
@@ -84,6 +101,7 @@ export default function Scanner() {
     }
     setError("");
     setResults(null);
+    setMeta(null);
     const stepMs = reducedMotion ? 60 : 850;
     const startedAt = Date.now();
     PHASES.forEach((_, i) => {
@@ -91,19 +109,31 @@ export default function Scanner() {
     });
     try {
       const data = await scanPhoto(photoFile, { species, markings, location });
+      // Backend returns high-confidence matches only, ranked by similarity.
       const ranked = (data.matches || []).map((m) => ({
         pet: m.animal,
-        score: Math.round(m.score),
+        score: Number(m.score) || 0,
+        visual: Number(m.visual ?? m.score) || 0,
         band: m.band,
         reasons: m.reasons || [],
       }));
+      const scanMeta = {
+        totalCompared: data.totalCompared ?? ranked.length,
+        staleEmbeddings: data.staleEmbeddings ?? 0,
+        withoutEmbeddings: data.withoutEmbeddings ?? 0,
+        threshold: data.threshold ?? 50,
+        engine: data.engine || "sam-3.1",
+        segmentation: data.segmentation || null,
+        detectedSpecies: data.detectedSpecies || null,
+      };
       const elapsed = Date.now() - startedAt;
       const remaining = Math.max(0, PHASES.length * stepMs + (reducedMotion ? 0 : 400) - elapsed);
       timers.current.push(
         window.setTimeout(() => {
           setResults(ranked);
+          setMeta(scanMeta);
           setPhase(4);
-          logActivity(`Photo scan run (${ranked[0] ? `top match ${petDisplayId(ranked[0].pet)} at ${ranked[0].score}%` : "no profiles"})`, null);
+          logActivity(`Photo scan run (${ranked[0] ? `top match ${petDisplayId(ranked[0].pet)} at ${formatScore(ranked[0].score)}%` : "no high-confidence matches"})`, null);
         }, remaining),
       );
     } catch (err) {
@@ -120,6 +150,7 @@ export default function Scanner() {
     setPhoto(null);
     setPhotoFile(null);
     setResults(null);
+    setMeta(null);
     setPhase(-1);
     setMarkings("");
     setLocation("");
@@ -128,7 +159,16 @@ export default function Scanner() {
 
   const scanning = phase >= 0 && phase < PHASES.length;
   const top = results?.[0];
+  const cutoff = meta?.threshold ?? 50;
+  const valid = Boolean(top && top.score >= cutoff);
   const withPhotos = pets.filter((p) => petPhoto(p));
+
+  const openResult = (entry) => {
+    navigate("pet", entry.pet.id, {
+      score: formatScore(entry.score),
+      band: entry.band || "",
+    });
+  };
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-10 sm:px-6">
@@ -139,8 +179,9 @@ export default function Scanner() {
         Photo search scanner
       </h1>
       <p className="mt-2 max-w-2xl text-sm text-stone-600">
-        Found a pet? Upload a photo and the scanner ranks every registered profile by visual
-        similarity, markings, species, and location. No account needed.
+        Found a pet? Upload a photo and the scanner compares it against every registered
+        profile, then shows the top matches ranked by visual similarity.
+        No account needed.
       </p>
 
       <div className="mt-8 grid gap-6 lg:grid-cols-[1fr_380px]">
@@ -237,13 +278,13 @@ export default function Scanner() {
             </div>
           )}
 
-          {/* Results */}
+          {/* Results — top matches ranked by similarity; scores ≥ cutoff are valid */}
           {phase === 4 && results && (
             <section className="mt-6" aria-live="polite">
-              {top && top.score >= 80 ? (
+              {valid ? (
                 <div className="rounded-2xl bg-pine-950 p-5 text-white">
                   <p className="text-xs font-bold tracking-widest text-amber-400 uppercase">
-                    Likely match · {top.score}% confidence
+                    Top match · {formatScore(top.score)}% {confidenceLabel(top.score)}
                   </p>
                   <div className="mt-2 flex flex-wrap items-center gap-4">
                     {petPhoto(top.pet) ? (
@@ -253,14 +294,18 @@ export default function Scanner() {
                     )}
                     <div className="min-w-0 flex-1">
                       <p className="font-display text-2xl font-bold">
-                        {top.pet.name} <span className="font-mono text-sm font-normal text-stone-300">{petDisplayId(top.pet)}</span>
+                        {top.pet.name}{" "}
+                        <span className="font-mono text-sm font-normal text-stone-300">{petDisplayId(top.pet)}</span>
                       </p>
                       <p className="text-sm text-stone-300">
-                        {top.pet.breed} · {top.pet.location}
+                        {top.pet.species} · {top.pet.breed || "Breed unknown"}
+                      </p>
+                      <p className="text-xs text-stone-400">
+                        {[top.pet.color, top.pet.location].filter(Boolean).join(" · ")}
                       </p>
                     </div>
                     <button
-                      onClick={() => navigate("pet", top.pet.id)}
+                      onClick={() => openResult(top)}
                       className="cursor-pointer rounded-xl bg-amber-400 px-5 py-2.5 text-sm font-bold text-pine-950 hover:bg-amber-300"
                     >
                       Open profile
@@ -269,10 +314,18 @@ export default function Scanner() {
                 </div>
               ) : (
                 <div className="rounded-2xl border border-brass-100 bg-amber-50 p-5">
-                  <p className="font-display text-xl font-bold text-pine-950">No strong match found</p>
+                  <p className="font-display text-xl font-bold text-pine-950">
+                    {meta?.detectedSpecies ? `No confident ${meta.detectedSpecies.toLowerCase()} match found` : "No confident match found"}
+                  </p>
                   <p className="mt-1 text-sm text-stone-600">
-                    The closest profiles are below. If none look right, this pet may not be
-                    registered yet — you can list them as found.
+                    {results.length > 0
+                      ? `Top score was ${formatScore(top.score)}% — below the ${cutoff}% confident-match cutoff. Closest ${meta?.detectedSpecies ? `${meta.detectedSpecies.toLowerCase()} ` : ""}profiles are listed below.`
+                      : meta && meta.totalCompared > 0
+                        ? meta.detectedSpecies
+                          ? `No scannable ${meta.detectedSpecies} profiles to compare against yet — other species are never mixed in.`
+                          : `Compared against ${meta.totalCompared} registered ${meta.totalCompared === 1 ? "profile" : "profiles"}, but none have a scannable photo yet.`
+                        : "There are no registered profiles to compare against yet."}{" "}
+                    This pet may not be registered — you can list them as found.
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button
@@ -291,56 +344,90 @@ export default function Scanner() {
                 </div>
               )}
 
-              <h2 className="font-display mt-6 text-2xl font-bold text-pine-950">
-                All matches ({results.length})
-              </h2>
-              <ul className="mt-3 space-y-3">
-                {results.map(({ pet, score, band, reasons }) => (
-                  <li
-                    key={pet.id}
-                    className="flex gap-4 rounded-2xl border border-stone-200 bg-white p-4"
-                  >
-                    {petPhoto(pet) ? (
-                      <img src={petPhoto(pet)} alt="" className="h-20 w-20 shrink-0 rounded-xl object-cover" />
-                    ) : (
-                      <PetAvatar pet={pet} className="h-20 w-20 shrink-0 rounded-xl [&_span:first-of-type]:text-3xl" />
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button
-                          onClick={() => navigate("pet", pet.id)}
-                          className="cursor-pointer font-display text-lg font-bold text-pine-950 hover:underline"
-                        >
-                          {pet.name}
-                        </button>
-                        <span className="font-mono text-xs text-stone-400">{petDisplayId(pet)}</span>
-                        <StatusPill status={pet.status} />
-                      </div>
-                      <p className="mt-0.5 truncate text-xs font-medium text-stone-500">
-                        {pet.breed} · {pet.location}
+              {results.length > 0 && (
+                <>
+                  <h2 className="font-display mt-6 text-2xl font-bold text-pine-950">
+                    {valid ? `Top matches (${results.length})` : `Closest profiles (${results.length})`}
+                  </h2>
+                  {meta && (
+                    <>
+                      <p className="mt-1 text-xs font-medium text-stone-500">
+                        Compared against {meta.totalCompared} {meta.totalCompared === 1 ? "profile" : "profiles"} ·
+                        top {results.length} shown · {meta.threshold}%+ is a confident match
                       </p>
-                      <div className="mt-2 flex items-center gap-2">
-                        <div className="h-2 flex-1 overflow-hidden rounded-full bg-stone-100">
-                          <div
-                            className={`h-full rounded-full ${band === "High" ? "bg-pine-800" : band === "Medium" ? "bg-amber-500" : "bg-stone-300"}`}
-                            style={{ width: `${score}%` }}
-                          />
-                        </div>
-                        <span className={`rounded-md px-2 py-0.5 text-xs font-bold ${BAND_STYLE[band]}`}>
-                          {score}%
-                        </span>
-                      </div>
                       <div className="mt-2 flex flex-wrap gap-1.5">
-                        {reasons.map((r) => (
-                          <span key={r} className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] font-semibold text-stone-600">
-                            {r}
+                        {meta.detectedSpecies && (
+                          <span className="rounded-full bg-pine-900 px-2.5 py-1 text-[11px] font-bold text-white">
+                            {meta.detectedSpecies} matches only
                           </span>
-                        ))}
+                        )}
+                        <span className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${meta.segmentation?.applied ? "bg-pine-100 text-pine-900" : "bg-stone-100 text-stone-600"}`}>
+                          {meta.segmentation?.applied ? "Subject isolated · background removed" : "Full-photo analysis"}
+                        </span>
+                        {meta.staleEmbeddings + meta.withoutEmbeddings > 0 && (
+                          <span className="rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-bold text-amber-800">
+                            {meta.staleEmbeddings + meta.withoutEmbeddings}{" "}
+                            {meta.staleEmbeddings + meta.withoutEmbeddings === 1 ? "profile needs" : "profiles need"} a photo re-upload for matching
+                          </span>
+                        )}
                       </div>
-                    </div>
-                  </li>
-                ))}
-              </ul>
+                    </>
+                  )}
+                  <ul className="mt-3 space-y-3">
+                    {results.map(({ pet, score, band, reasons }, i) => (
+                      <li
+                        key={pet.id}
+                        className="flex gap-4 rounded-2xl border border-stone-200 bg-white p-4"
+                      >
+                        <span className="w-6 shrink-0 pt-1 text-center font-mono text-xs font-bold text-stone-400">
+                          {i + 1}
+                        </span>
+                        {petPhoto(pet) ? (
+                          <img src={petPhoto(pet)} alt="" className="h-20 w-20 shrink-0 rounded-xl object-cover" />
+                        ) : (
+                          <PetAvatar pet={pet} className="h-20 w-20 shrink-0 rounded-xl [&_span:first-of-type]:text-3xl" />
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              onClick={() => openResult({ pet, score, band })}
+                              className="cursor-pointer font-display text-lg font-bold text-pine-950 hover:underline"
+                            >
+                              {pet.name}
+                            </button>
+                            <span className="font-mono text-xs text-stone-400">{petDisplayId(pet)}</span>
+                            <StatusPill status={pet.status} />
+                          </div>
+                          <p className="mt-0.5 text-xs font-semibold text-stone-600">
+                            {pet.species} · {pet.breed || "Breed unknown"}
+                          </p>
+                          <p className="truncate text-xs font-medium text-stone-500">
+                            {[pet.color, pet.location].filter(Boolean).join(" · ")}
+                          </p>
+                          <div className="mt-2 flex items-center gap-2">
+                            <div className="h-2 flex-1 overflow-hidden rounded-full bg-stone-100">
+                              <div
+                                className={`h-full rounded-full ${band === "High" ? "bg-pine-800" : band === "Medium" ? "bg-amber-500" : "bg-stone-300"}`}
+                                style={{ width: `${Math.min(100, score)}%` }}
+                              />
+                            </div>
+                            <span className={`rounded-md px-2 py-0.5 text-xs font-bold whitespace-nowrap ${BAND_STYLE[band] || BAND_STYLE.Low}`}>
+                              {formatScore(score)}% {confidenceLabel(score)}
+                            </span>
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {reasons.map((r) => (
+                              <span key={r} className="rounded-full bg-stone-100 px-2.5 py-1 text-[11px] font-semibold text-stone-600">
+                                {r}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
             </section>
           )}
         </div>
@@ -366,6 +453,11 @@ export default function Scanner() {
                     <option key={s}>{s}</option>
                   ))}
                 </select>
+                <p className="mt-1 text-[11px] text-stone-400">
+                  {species === "Unknown"
+                    ? "Species is auto-detected from the closest visual match."
+                    : `Only ${species} profiles will be compared — nothing else.`}
+                </p>
               </div>
               <div>
                 <label htmlFor="scan-marks" className="mb-1 block text-xs font-bold text-stone-500">
@@ -415,9 +507,9 @@ export default function Scanner() {
               How matching works
             </h2>
             <ol className="mt-3 list-decimal space-y-2 pl-5 text-stone-600">
-              <li>Your photo is embedded by Meta AI SAM 3.1 on our secure server.</li>
-              <li>Cosine similarity ranks it against every registered profile.</li>
-              <li>Lost pets and 4-angle reference sets rank higher.</li>
+              <li>SAM 3.1 isolates the animal and removes the background on our secure server.</li>
+              <li>Only the same species is ever compared; face and markings weigh most.</li>
+              <li>Top matches are always shown; scores of 50%+ count as confident.</li>
             </ol>
           </div>
         </aside>

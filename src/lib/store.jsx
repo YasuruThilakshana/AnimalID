@@ -68,7 +68,7 @@ export function buildHash(name, param, query) {
   if (name === "alerts") return `#/alerts${q}`;
   if (name === "auth") return `#/auth${q}`;
   if (name === "register") return `#/register${q}`;
-  if (name === "pet") return `#/pet/${encodeURIComponent(param || "")}`;
+  if (name === "pet") return `#/pet/${encodeURIComponent(param || "")}${q}`;
   if (name === "dashboard") return "#/dashboard";
   return "#/";
 }
@@ -264,7 +264,9 @@ export function StoreProvider({ children }) {
 
   /**
    * Run a photo scan against the backend. Returns
-   * { match: { animal, similarity, band, reasons } | null, matches: [...] }.
+   * { match: { animal, similarity, band, reasons } | null, matches: [...],
+   *   totalCompared, threshold, topN, engine } — matches are pre-filtered to
+   * high-confidence candidates ranked by similarity (descending).
    */
   const scanPhoto = useCallback(async (file, hints = {}) => {
     const form = new FormData();

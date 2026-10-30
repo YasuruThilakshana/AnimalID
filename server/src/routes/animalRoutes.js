@@ -8,6 +8,7 @@ const {
   deleteAnimal,
   reportSighting,
   scanPhoto,
+  reindexEmbeddings,
 } = require("../controllers/animalController");
 
 const router = Router();
@@ -21,6 +22,7 @@ const photoFields = upload.fields([
 
 router.get("/", listAnimals);
 router.post("/scan", upload.single("photo"), scanPhoto);
+router.post("/reindex", reindexEmbeddings);
 router.get("/:id", getAnimal);
 router.post("/", photoFields, createAnimal);
 router.put("/:id", photoFields, updateAnimal);

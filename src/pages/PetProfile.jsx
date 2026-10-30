@@ -36,6 +36,8 @@ export default function PetProfile() {
   const photoAngles = Object.keys(ANGLE_LABELS).filter((k) => petPhoto(pet, k));
   const currentPhoto = petPhoto(pet, angle);
   const displayId = petDisplayId(pet);
+  const scanScore = route.query?.score;
+  const scanBand = route.query?.band;
 
   const setStatus = async (status) => {
     const label = status === "lost" ? "Reported lost" : status === "found" ? "Listed as found" : "Marked safe at home";
@@ -89,6 +91,21 @@ export default function PetProfile() {
       >
         ← Back
       </button>
+
+      {scanScore && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-pine-950 px-5 py-4 text-white">
+          <p className="text-sm font-bold">
+            Photo scan match — {scanScore}% visual similarity
+            {scanBand ? <span className="ml-2 rounded-md bg-amber-400 px-2 py-0.5 text-xs font-bold text-pine-950">{scanBand} confidence</span> : null}
+          </p>
+          <button
+            onClick={() => navigate("scan")}
+            className="cursor-pointer rounded-lg bg-white/15 px-4 py-2 text-sm font-bold hover:bg-white/25"
+          >
+            Back to scan results
+          </button>
+        </div>
+      )}
 
       {pet.status === "lost" && (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-ember-600 px-5 py-4 text-white">
@@ -325,7 +342,9 @@ export default function PetProfile() {
                 ) : (
                   <div className="rounded-xl bg-white/10 p-3 text-sm">
                     <p className="font-bold">Delete {pet.name}'s profile?</p>
-                    <p className="mt-1 text-xs text-stone-300">This can't be undone.</p>
+                    <p className="mt-1 text-xs text-stone-300">
+                      This permanently removes the profile, photos, and all records. This can't be undone.
+                    </p>
                     <div className="mt-3 flex gap-2">
                       <button
                         onClick={remove}

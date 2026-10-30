@@ -105,6 +105,17 @@ const Animal = sequelize.define(
       type: DataTypes.JSON,
       allowNull: true,
     },
+    embeddingVer: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 1,
+      field: "embedding_ver",
+    },
+    angleEmbeddings: {
+      type: DataTypes.JSON,
+      allowNull: true,
+      field: "angle_embeddings",
+    },
     sightings: {
       type: DataTypes.JSON,
       allowNull: false,
