@@ -8,7 +8,7 @@ Pet registration, photo-scan identification, and a lost & found alerts hub.
 ## Prerequisites
 
 - Node.js 18+
-- A running MySQL server (e.g. `root` / `2001@yasuruM` locally)
+- A running MySQL server (e.g. `root` / `*********` locally)
 
 ## Backend setup (`server/`)
 
