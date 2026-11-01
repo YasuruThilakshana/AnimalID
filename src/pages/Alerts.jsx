@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PetAvatar, ScanCode } from "../components/ui";
 import { apiError } from "../lib/api.js";
 import { petDisplayId, petPhoto, SPECIES_OPTIONS, timeAgo, useStore } from "../lib/store";
@@ -31,12 +31,14 @@ function TearTabs({ phone }) {
 
 export function PosterSheet({ pet, custom }) {
   const photo = petPhoto(pet, custom.angle) || petPhoto(pet);
+  const lostAt = custom.lostLocation || pet.lostLocation || pet.location;
+  const home = custom.homeAddress || pet.location;
   return (
     <div id="poster-print" className="mx-auto w-full max-w-md overflow-hidden rounded-lg border-4 border-ember-600 bg-white">
       <div className="bg-ember-600 px-6 py-4 text-center">
         <p className="text-5xl font-black tracking-tight text-white">{custom.headline || "LOST"}</p>
         <p className="mt-1 text-sm font-bold tracking-widest text-amber-200 uppercase">
-          {pet.species} · {pet.location}
+          {pet.species} · {home}
         </p>
       </div>
 
@@ -60,7 +62,7 @@ export function PosterSheet({ pet, custom }) {
         <div className="mt-4 space-y-1.5 text-sm">
           <p>
             <span className="font-black text-stone-900">LAST SEEN: </span>
-            {pet.location} · {timeAgo(lostSince(pet))}
+            {lostAt} · {timeAgo(lostSince(pet))}
           </p>
           <p>
             <span className="font-black text-stone-900">MARKINGS: </span>
@@ -106,17 +108,39 @@ export function PosterSheet({ pet, custom }) {
 }
 
 function PosterModal({ pet, onClose }) {
-  const { toast } = useStore();
+  const { toast, currentUser, savePet } = useStore();
+  const isOwner = currentUser?.email === pet.ownerEmail;
+  const [saving, setSaving] = useState(false);
   const [custom, setCustom] = useState({
     headline: "LOST",
     reward: "",
     contact: pet.contact,
+    lostLocation: pet.lostLocation || pet.location || "",
+    homeAddress: pet.location || "",
     notes: "",
     angle: "front",
   });
   const set = (k, v) => setCustom((c) => ({ ...c, [k]: v }));
+
+  // Owner-only: persist the reporter's incident details back to the alert.
+  const saveDetails = async () => {
+    setSaving(true);
+    try {
+      await savePet({
+        ...pet,
+        contact: custom.contact.trim() || pet.contact,
+        lostLocation: custom.lostLocation.trim() || pet.lostLocation || pet.location,
+        location: custom.homeAddress.trim() || pet.location,
+      });
+      toast("Alert details saved.");
+    } catch (err) {
+      toast(apiError(err, "Could not save the alert details."), "warn");
+    } finally {
+      setSaving(false);
+    }
+  };
   const inputCls =
-    "w-full rounded-xl border border-stone-300 bg-white px-3 py-2 text-sm focus:border-pine-700 focus:outline-none";
+    "w-full rounded-xl border border-stone-300 bg-white px-3 py-2 text-sm focus:border-pine-700 focus:outline-none disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-stone-400";
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-pine-950/80 p-4" role="dialog" aria-modal="true" aria-label={`Lost poster for ${pet.name}`}>
@@ -132,26 +156,39 @@ function PosterModal({ pet, onClose }) {
               ×
             </button>
           </div>
+          {!isOwner && (
+            <p className="mt-4 rounded-lg bg-stone-100 px-3 py-2 text-[11px] font-semibold text-stone-500">
+              Read-only preview — only the pet owner can edit reward, contact, and location details.
+            </p>
+          )}
           <div className="mt-4 space-y-3">
             <div>
               <label className="mb-1 block text-xs font-bold text-stone-500" htmlFor="poster-headline">Headline</label>
-              <input id="poster-headline" value={custom.headline} onChange={(e) => set("headline", e.target.value.toUpperCase().slice(0, 12))} className={inputCls} />
+              <input id="poster-headline" value={custom.headline} onChange={(e) => set("headline", e.target.value.toUpperCase().slice(0, 12))} disabled={!isOwner} className={inputCls} />
             </div>
             <div>
               <label className="mb-1 block text-xs font-bold text-stone-500" htmlFor="poster-reward">Reward (optional)</label>
-              <input id="poster-reward" value={custom.reward} onChange={(e) => set("reward", e.target.value)} placeholder="$200" className={inputCls} />
+              <input id="poster-reward" value={custom.reward} onChange={(e) => set("reward", e.target.value)} placeholder="$200" disabled={!isOwner} className={inputCls} />
             </div>
             <div>
               <label className="mb-1 block text-xs font-bold text-stone-500" htmlFor="poster-contact">Contact number</label>
-              <input id="poster-contact" value={custom.contact} onChange={(e) => set("contact", e.target.value)} className={inputCls} />
+              <input id="poster-contact" value={custom.contact} onChange={(e) => set("contact", e.target.value)} disabled={!isOwner} className={inputCls} />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-bold text-stone-500" htmlFor="poster-lost">Lost location</label>
+              <input id="poster-lost" value={custom.lostLocation} onChange={(e) => set("lostLocation", e.target.value)} placeholder="Park, street, landmark…" disabled={!isOwner} className={inputCls} />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-bold text-stone-500" htmlFor="poster-home">Home address</label>
+              <input id="poster-home" value={custom.homeAddress} onChange={(e) => set("homeAddress", e.target.value)} disabled={!isOwner} className={inputCls} />
             </div>
             <div>
               <label className="mb-1 block text-xs font-bold text-stone-500" htmlFor="poster-notes">Extra note (optional)</label>
-              <input id="poster-notes" value={custom.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Shy — do not chase" className={inputCls} />
+              <input id="poster-notes" value={custom.notes} onChange={(e) => set("notes", e.target.value)} placeholder="Shy — do not chase" disabled={!isOwner} className={inputCls} />
             </div>
             <div>
               <label className="mb-1 block text-xs font-bold text-stone-500" htmlFor="poster-angle">Photo</label>
-              <select id="poster-angle" value={custom.angle} onChange={(e) => set("angle", e.target.value)} className={`${inputCls} cursor-pointer`}>
+              <select id="poster-angle" value={custom.angle} onChange={(e) => set("angle", e.target.value)} disabled={!isOwner} className={`${inputCls} cursor-pointer`}>
                 {["front", "left", "right", "mark"].map((a) => (
                   <option key={a} value={a}>
                     {a === "front" ? "Front face" : a === "left" ? "Left side" : a === "right" ? "Right side" : "Identifying mark"}
@@ -160,6 +197,15 @@ function PosterModal({ pet, onClose }) {
                 ))}
               </select>
             </div>
+            {isOwner && (
+              <button
+                onClick={saveDetails}
+                disabled={saving}
+                className="w-full cursor-pointer rounded-xl bg-pine-900 px-4 py-3 text-sm font-bold text-white hover:bg-pine-800 disabled:opacity-60"
+              >
+                Save details to alert
+              </button>
+            )}
             <button
               onClick={() => {
                 toast("Opening print dialog — choose Save as PDF to download.");
@@ -181,7 +227,12 @@ function PosterModal({ pet, onClose }) {
 }
 
 export default function Alerts() {
-  const { pets, route, navigate, toast, subscribeAlerts } = useStore();
+  const { pets, route, navigate, toast, subscribeAlerts, markAlertsSeen, currentUser } = useStore();
+
+  // Visiting the hub clears the unread-alert badge until new reports land.
+  useEffect(() => {
+    markAlertsSeen();
+  }, [markAlertsSeen]);
   const q = route.query;
   const [location, setLocation] = useState(q.location || "");
   const [species, setSpecies] = useState(q.species || "Any species");
@@ -214,7 +265,7 @@ export default function Alerts() {
     return lost
       .filter((p) => {
         if (q.species && q.species !== "Any species" && p.species !== q.species) return false;
-        if (loc && !String(p.location || "").toLowerCase().includes(loc)) return false;
+        if (loc && ![p.lostLocation, p.location].some((v) => String(v || "").toLowerCase().includes(loc))) return false;
         if (kw && ![p.name, p.breed, p.color, p.marks, p.tagNumber, p.id].join(" ").toLowerCase().includes(kw)) return false;
         if (now - lostSince(p) > window_ms) return false;
         return true;
@@ -334,8 +385,18 @@ export default function Alerts() {
                   </span>
                 </div>
                 <p className="mt-0.5 text-xs font-medium text-stone-500">
-                  {p.breed} · {p.color} · {p.location}
+                  {p.breed} · {p.color}
                 </p>
+                <div className="mt-1.5 space-y-0.5 text-xs">
+                  <p>
+                    <span className="font-bold text-ember-700">Last seen / lost location: </span>
+                    <span className="font-semibold text-stone-700">{p.lostLocation || p.location}</span>
+                  </p>
+                  <p>
+                    <span className="font-bold text-stone-500">Registered home address: </span>
+                    <span className="text-stone-500">{p.location}</span>
+                  </p>
+                </div>
                 <p className="mt-1.5 line-clamp-2 text-sm text-stone-600">
                   {p.marks || "No marking details recorded."}
                 </p>
@@ -355,7 +416,7 @@ export default function Alerts() {
                 onClick={() => openPoster(p.id)}
                 className="flex-1 cursor-pointer rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm font-bold text-stone-700 hover:border-stone-400"
               >
-                Create poster
+                {currentUser?.email === p.ownerEmail ? "Edit / Create poster" : "View poster"}
               </button>
             </div>
           </article>

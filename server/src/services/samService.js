@@ -7,6 +7,9 @@ const {
   EMBEDDING_VERSION,
   FACE_WEIGHT,
   MARKING_WEIGHT,
+  BIOMETRIC_REGIONS,
+  MICRO_REGION_DIM,
+  MICRO_EMBEDDING_DIM,
 } = require("./imageFeatures");
 
 const DEFAULT_SAM_API_URL = "https://api.meta.ai/v1";
@@ -44,13 +47,19 @@ function getEmbeddingEngine() {
 
 /**
  * Full feature extraction: SAM-guided background removal + weighted
- * multi-region embedding. Returns { embedding, localEmbedding, segmentation,
- * regions, version, engine }.
+ * multi-region embedding + fine-grained biometric micro-crops. Returns
+ * { embedding, globalEmbedding, microEmbedding, regionEmbeddings,
+ *   localEmbedding, localMicroEmbedding, segmentation, regions, version,
+ *   engine }.
  *
- * `embedding` is the primary (SAM-guided when the API answers) vector, while
- * `localEmbedding` is ALWAYS the deterministic API-free vector for the same
- * bytes. Storing and comparing both guarantees identical images score 100%
- * even if SAM answers on one side and falls back on the other.
+ * `embedding` is the primary (SAM-guided when the API answers) global vector,
+ * while `localEmbedding` is ALWAYS the deterministic API-free vector for the
+ * same bytes. Storing and comparing both guarantees identical images score
+ * 100% even if SAM answers on one side and falls back on the other.
+ * `microEmbedding` is the concatenated + normalized high-dimensional vector
+ * of the localized biometric crops (facial mask, muzzle/nose print, ear
+ * pattern, coat markings) — the fine-grained signal that separates identical
+ * twins and lookalikes sharing one global body embedding.
  */
 async function extractAnimalFeatures(buffer, mimeType = "image/jpeg", concept = SAM_CONCEPT) {
   const input = toBuffer(buffer);
@@ -67,7 +76,9 @@ async function extractAnimalFeatures(buffer, mimeType = "image/jpeg", concept = 
       const deterministic = extractLocalFeatures(input, mimeType);
       return {
         ...remote,
+        globalEmbedding: remote.globalEmbedding || remote.embedding,
         localEmbedding: deterministic.embedding,
+        localMicroEmbedding: deterministic.microEmbedding,
         engine: lastEngine,
         version: EMBEDDING_VERSION,
       };
@@ -75,7 +86,52 @@ async function extractAnimalFeatures(buffer, mimeType = "image/jpeg", concept = 
   }
   const local = extractLocalFeatures(input, mimeType);
   lastEngine = local.segmentation.method === "bytes" ? "sam-3.1-bytes" : "sam-3.1-local";
-  return { ...local, localEmbedding: local.embedding, regions: true, engine: lastEngine };
+  return {
+    ...local,
+    globalEmbedding: local.embedding,
+    localEmbedding: local.embedding,
+    localMicroEmbedding: local.microEmbedding,
+    regions: true,
+    engine: lastEngine,
+  };
+}
+
+/**
+ * Multi-crop biometric extraction during scan: full-body global embedding
+ * PLUS localized high-resolution crops of the unique biometric regions,
+ * fused into one normalized fine-grained vector before database lookup.
+ */
+async function extractMultiCropEmbeddings(buffer, mimeType = "image/jpeg", concept = SAM_CONCEPT) {
+  const features = await extractAnimalFeatures(buffer, mimeType, concept);
+  return {
+    global: features.globalEmbedding,
+    globalEmbedding: features.globalEmbedding,
+    regions: features.regionEmbeddings,
+    regionEmbeddings: features.regionEmbeddings,
+    micro: features.microEmbedding,
+    microEmbedding: features.microEmbedding,
+    segmentation: features.segmentation,
+    version: features.version || EMBEDDING_VERSION,
+    engine: features.engine,
+  };
+}
+
+/**
+ * Concatenate per-region biometric vectors in BIOMETRIC_REGIONS order and
+ * L2-normalize into the high-dimensional fine-grained biometric vector.
+ */
+function buildFineGrainedVector(regionEmbeddings) {
+  if (!regionEmbeddings || typeof regionEmbeddings !== "object" || Array.isArray(regionEmbeddings)) {
+    throw new Error("buildFineGrainedVector requires per-region biometric vectors.");
+  }
+  const parts = BIOMETRIC_REGIONS.map((name) => {
+    const vector = regionEmbeddings[name];
+    if (!Array.isArray(vector) || !vector.length) {
+      throw new Error(`Missing biometric region vector: ${name}.`);
+    }
+    return resizeVector(vector.map(Number), MICRO_REGION_DIM);
+  });
+  return normalize(parts.flat());
 }
 
 /** Route to the Responses API or a legacy custom embeddings endpoint. */
@@ -119,6 +175,9 @@ async function fetchSamFeatures(apiUrl, apiKey, buffer, mimeType, concept) {
     const cropped = extractFromCrop(buffer, mimeType, box);
     return {
       embedding: cropped.embedding,
+      globalEmbedding: cropped.embedding,
+      microEmbedding: cropped.microEmbedding,
+      regionEmbeddings: cropped.regionEmbeddings,
       segmentation: {
         applied: true,
         method: "sam-3.1",
@@ -232,9 +291,14 @@ async function fetchLegacyEmbedding(apiUrl, apiKey, buffer, mimeType) {
     if (!vector) {
       throw new Error("SAM API response did not contain an embedding vector");
     }
+    const global = normalize(resizeVector(vector, EMBEDDING_DIM));
+    const micro = legacyMicroEmbedding(regionVectors, buffer, mimeType);
     const mask = extractMask(data);
     return {
-      embedding: normalize(resizeVector(vector, EMBEDDING_DIM)),
+      embedding: global,
+      globalEmbedding: global,
+      microEmbedding: micro.microEmbedding,
+      regionEmbeddings: micro.regions,
       segmentation: {
         applied: Boolean(mask || data.background_removed !== false),
         method: "sam-3.1",
@@ -292,6 +356,38 @@ function fuseRegionVectors(regions) {
   }
   if (!totalWeight) return null;
   return normalize(fused.map((v) => v / totalWeight));
+}
+
+/**
+ * Build the fine-grained micro vector for a legacy endpoint response: reuse
+ * biometric-named region vectors when the API returns them, else derive the
+ * deterministic local micro vector for the same bytes so stage-2 matching
+ * always has a signal.
+ */
+function legacyMicroEmbedding(regionVectors, buffer, mimeType) {
+  if (regionVectors) {
+    const aliases = {
+      facial_mask: ["facial_mask", "face", "facial", "head"],
+      muzzle: ["muzzle", "nose", "nose_print", "snout"],
+      ear_pattern: ["ear_pattern", "ear", "ears"],
+      coat_markings: ["coat_markings", "markings", "marks", "spots", "pattern"],
+    };
+    const picked = {};
+    let complete = true;
+    for (const [region, names] of Object.entries(aliases)) {
+      const hit = names.map((n) => regionVectors[n]).find((v) => Array.isArray(v) && v.length);
+      if (!hit) {
+        complete = false;
+        break;
+      }
+      picked[region] = hit;
+    }
+    if (complete) {
+      return { regions: picked, microEmbedding: buildFineGrainedVector(picked) };
+    }
+  }
+  const local = extractLocalFeatures(toBuffer(buffer), mimeType);
+  return { regions: local.regionEmbeddings, microEmbedding: local.microEmbedding };
 }
 
 /** Extract a subject mask ({ data, width, height }) when the API returns one. */
@@ -432,6 +528,8 @@ function normalize(vector) {
 module.exports = {
   getImageEmbedding,
   extractAnimalFeatures,
+  extractMultiCropEmbeddings,
+  buildFineGrainedVector,
   getEmbeddingEngine,
   extractOutputText,
   parseSamBoxes,
@@ -441,4 +539,7 @@ module.exports = {
   localEmbedding,
   EMBEDDING_DIM,
   EMBEDDING_VERSION,
+  BIOMETRIC_REGIONS,
+  MICRO_REGION_DIM,
+  MICRO_EMBEDDING_DIM,
 };

@@ -96,6 +96,8 @@ export function StoreProvider({ children }) {
   const [authReady, setAuthReady] = useState(false);
   const [activity, setActivity] = useState(() => read(LS_ACTIVITY, []));
   const [toasts, setToasts] = useState([]);
+  const [notifications, setNotifications] = useState([]);
+  const [alertsSeenAt, setAlertsSeenAt] = useState(0);
 
   useEffect(() => {
     const onHash = () => {
@@ -130,6 +132,69 @@ export function StoreProvider({ children }) {
     setActivity((prev) => [{ t: Date.now(), text, email: email || null }, ...prev].slice(0, 80));
   }, []);
 
+  const fetchNotifications = useCallback(async () => {
+    if (!getAuthToken()) {
+      setNotifications([]);
+      return [];
+    }
+    try {
+      const { data } = await api.get("/notifications");
+      const list = Array.isArray(data.notifications) ? data.notifications : [];
+      setNotifications(list);
+      return list;
+    } catch {
+      return null; // offline — keep the last known list
+    }
+  }, []);
+
+  const notificationsUnread = useMemo(() => notifications.filter((n) => !n.read).length, [notifications]);
+
+  const markNotificationsRead = useCallback(async () => {
+    if (!getAuthToken()) return;
+    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    try {
+      await api.post("/notifications/read-all");
+    } catch {
+      fetchNotifications(); // fall back to server truth
+    }
+  }, [fetchNotifications]);
+
+  const alertsSeenKey = (email) => `animalid.alertsSeen.${String(email || "").toLowerCase()}`;
+
+  // Per-user "last viewed the Alerts Hub" marker; everything reported missing
+  // after it counts as unread until the next visit.
+  useEffect(() => {
+    if (!currentUser) {
+      setAlertsSeenAt(0);
+      return;
+    }
+    try {
+      setAlertsSeenAt(Number(localStorage.getItem(alertsSeenKey(currentUser.email))) || 0);
+    } catch {
+      setAlertsSeenAt(0);
+    }
+  }, [currentUser]);
+
+  const markAlertsSeen = useCallback(() => {
+    if (!currentUser) return;
+    const now = Date.now();
+    setAlertsSeenAt(now);
+    try {
+      localStorage.setItem(alertsSeenKey(currentUser.email), String(now));
+    } catch {
+      /* seen marker simply won't persist */
+    }
+  }, [currentUser]);
+
+  const unreadAlerts = useMemo(() => {
+    if (!currentUser) return 0;
+    return pets.filter((p) => {
+      if (p.status !== "lost") return false;
+      const entry = (p.timeline || []).filter((t) => String(t.text || "").toLowerCase().includes("lost")).pop();
+      return entry && Number(entry.t) > alertsSeenAt;
+    }).length;
+  }, [pets, currentUser, alertsSeenAt]);
+
   const refreshPets = useCallback(async () => {
     setPetsLoading(true);
     setPetsError("");
@@ -154,6 +219,7 @@ export function StoreProvider({ children }) {
       try {
         const { data } = await api.get("/auth/me");
         setCurrentUser(data.user);
+        fetchNotifications();
       } catch {
         setAuthToken(null);
         setCurrentUser(null);
@@ -161,7 +227,14 @@ export function StoreProvider({ children }) {
         setAuthReady(true);
       }
     })();
-  }, [refreshPets]);
+  }, [refreshPets, fetchNotifications]);
+
+  // Lightweight instant-notification polling while signed in.
+  useEffect(() => {
+    if (!currentUser) return undefined;
+    const id = window.setInterval(fetchNotifications, 45000);
+    return () => window.clearInterval(id);
+  }, [currentUser, fetchNotifications]);
 
   const signUp = useCallback(
     async (name, email, password) => {
@@ -169,13 +242,14 @@ export function StoreProvider({ children }) {
         const { data } = await api.post("/auth/register", { name, email, password });
         setAuthToken(data.token);
         setCurrentUser(data.user);
+        fetchNotifications();
         logActivity(`${data.user.name} created an account`, data.user.email);
         return { user: data.user };
       } catch (err) {
         return { error: apiError(err) };
       }
     },
-    [logActivity],
+    [logActivity, fetchNotifications],
   );
 
   const signIn = useCallback(
@@ -184,13 +258,14 @@ export function StoreProvider({ children }) {
         const { data } = await api.post("/auth/login", { email, password });
         setAuthToken(data.token);
         setCurrentUser(data.user);
+        fetchNotifications();
         logActivity(`${data.user.name} signed in`, data.user.email);
         return { user: data.user };
       } catch (err) {
         return { error: apiError(err) };
       }
     },
-    [logActivity],
+    [logActivity, fetchNotifications],
   );
 
   const signInDemo = useCallback(async () => {
@@ -206,6 +281,7 @@ export function StoreProvider({ children }) {
   const signOut = useCallback(async () => {
     setAuthToken(null);
     setCurrentUser(null);
+    setNotifications([]);
   }, []);
 
   /**
@@ -305,6 +381,12 @@ export function StoreProvider({ children }) {
       subscribeAlerts,
       activity,
       logActivity,
+      notifications,
+      notificationsUnread,
+      fetchNotifications,
+      markNotificationsRead,
+      unreadAlerts,
+      markAlertsSeen,
     }),
     [
       route,
@@ -328,6 +410,12 @@ export function StoreProvider({ children }) {
       subscribeAlerts,
       activity,
       logActivity,
+      notifications,
+      notificationsUnread,
+      fetchNotifications,
+      markNotificationsRead,
+      unreadAlerts,
+      markAlertsSeen,
     ],
   );
 
@@ -338,6 +426,25 @@ export function useStore() {
   const ctx = useContext(StoreContext);
   if (!ctx) throw new Error("useStore must be used inside StoreProvider");
   return ctx;
+}
+
+/** Pick the fields the assistant endpoint accepts as animal context. */
+export function toAssistantAnimal(pet) {
+  if (!pet) return null;
+  const out = {};
+  for (const key of ["name", "species", "breed", "age", "gender", "color", "weight", "location", "marks", "status"]) {
+    if (typeof pet[key] === "string" && pet[key].trim()) out[key] = pet[key].trim();
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/**
+ * Open the Ask Ash chat window with an animal's context attached.
+ * Scanner results and pet profiles call this so the species/category
+ * travels automatically to POST /api/assistant/chat.
+ */
+export function openAssistant(animal = null, prompt = "") {
+  window.dispatchEvent(new CustomEvent("animalid:ask-ash", { detail: { animal, prompt } }));
 }
 
 export function timeAgo(t) {

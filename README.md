@@ -32,6 +32,21 @@ ranks every stored record with cosine similarity and returns the best match
 with a similarity percentage. Without a key it uses a deterministic local
 embedding so development still works.
 
+### Assistant chat (Ask Ash)
+
+`POST /api/assistant/chat` accepts `{ message, history, animal, image }` and replies
+with `{ reply, suggestions }`. It chats via the Meta AI API (same `SAM_API_KEY`,
+model in `ASSISTANT_MODEL`) with a triage-style system prompt: emergencies
+first, then clarifying questions, a self-check checklist, an action plan, and
+when to see a vet — plus guidance for the app's register/scan/lost/found flows.
+Without a key (or when the API fails) it returns topic-aware offline replies
+with checklists, so the chat always answers. The floating chat widget adds
+voice input (speech-to-text mic) and voice replies (speech toggle) using the
+browser's built-in speech APIs — no extra service needed. The live assistant
+replies in the user's own language, covers food, diseases, behavior, and price
+ranges for all animals, and can examine an attached chat photo (sent as a
+downscaled JPEG data URL) so users can ask follow-up questions about it.
+
 ### API endpoints
 
 | Method | Path                     | Description                        |
@@ -44,6 +59,7 @@ embedding so development still works.
 | DELETE | /api/animals/:id         | Delete a record                    |
 | POST   | /api/animals/:id/sightings | Report a sighting                |
 | POST   | /api/animals/scan        | Photo search (multipart `photo`)   |
+| POST   | /api/assistant/chat      | Animal specialist chat (`{message, history, animal}`) |
 | POST   | /api/auth/register       | Create account (returns JWT)       |
 | POST   | /api/auth/login          | Sign in (returns JWT)              |
 | GET    | /api/auth/me             | Current user (Bearer token)        |

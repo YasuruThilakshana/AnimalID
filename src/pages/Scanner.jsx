@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { PetAvatar, StatusPill } from "../components/ui";
 import { apiError } from "../lib/api.js";
 import { fileToDataUrl } from "../lib/matcher";
-import { petDisplayId, petPhoto, SPECIES_OPTIONS, useStore } from "../lib/store";
+import { openAssistant, petDisplayId, petPhoto, SPECIES_OPTIONS, toAssistantAnimal, useStore } from "../lib/store";
 
 const PHASES = [
   "Isolating the animal from the background…",
@@ -47,7 +47,7 @@ export default function Scanner() {
   const [location, setLocation] = useState("");
   const [phase, setPhase] = useState(-1); // -1 idle, 0..3 scanning, 4 done
   const [results, setResults] = useState(null);
-  const [meta, setMeta] = useState(null); // { totalCompared, staleEmbeddings, withoutEmbeddings, threshold, engine, segmentation, detectedSpecies }
+  const [meta, setMeta] = useState(null); // { totalCompared, staleEmbeddings, withoutEmbeddings, threshold, engine, segmentation, detectedSpecies, ownerNotified }
   const [error, setError] = useState("");
   const timers = useRef([]);
 
@@ -125,6 +125,7 @@ export default function Scanner() {
         engine: data.engine || "sam-3.1",
         segmentation: data.segmentation || null,
         detectedSpecies: data.detectedSpecies || null,
+        ownerNotified: data.ownerNotified === true,
       };
       const elapsed = Date.now() - startedAt;
       const remaining = Math.max(0, PHASES.length * stepMs + (reducedMotion ? 0 : 400) - elapsed);
@@ -310,7 +311,18 @@ export default function Scanner() {
                     >
                       Open profile
                     </button>
+                    <button
+                      onClick={() => openAssistant(toAssistantAnimal(top.pet))}
+                      className="cursor-pointer rounded-xl bg-white/15 px-5 py-2.5 text-sm font-bold text-white hover:bg-white/25"
+                    >
+                      Ask Ash about {top.pet.name}
+                    </button>
                   </div>
+                  {meta?.ownerNotified && top.pet.status === "lost" && (
+                    <p className="mt-3 rounded-lg bg-emerald-500/20 px-3 py-2 text-xs font-bold text-emerald-200">
+                      100% match on a missing pet — the owner has been notified automatically.
+                    </p>
+                  )}
                 </div>
               ) : (
                 <div className="rounded-2xl border border-brass-100 bg-amber-50 p-5">
@@ -397,6 +409,12 @@ export default function Scanner() {
                             </button>
                             <span className="font-mono text-xs text-stone-400">{petDisplayId(pet)}</span>
                             <StatusPill status={pet.status} />
+                            <button
+                              onClick={() => openAssistant(toAssistantAnimal(pet))}
+                              className="cursor-pointer text-xs font-bold text-pine-700 hover:underline"
+                            >
+                              Ask Ash
+                            </button>
                           </div>
                           <p className="mt-0.5 text-xs font-semibold text-stone-600">
                             {pet.species} · {pet.breed || "Breed unknown"}

@@ -68,7 +68,7 @@ const inputCls =
   "w-full rounded-xl border border-stone-300 bg-white px-4 py-2.5 text-sm focus:border-pine-700 focus:outline-none";
 
 export default function RegisterPet() {
-  const { currentUser, authReady, navigate, savePet, pets, toast, logActivity, route } = useStore();
+  const { currentUser, authReady, navigate, savePet, pets, petsLoading, toast, logActivity, route } = useStore();
   const editId = route.query.edit || null;
   const editing = useMemo(
     () => (editId ? pets.find((p) => String(p.id) === String(editId)) : null),
@@ -128,6 +128,26 @@ export default function RegisterPet() {
   }, [form, currentUser, editing]);
 
   if (!authReady || !currentUser) return null;
+  if (editId && petsLoading) return null;
+
+  // Owner-only editing: a signed-in non-owner who opens another pet's edit
+  // link never sees the form (the API also rejects the save with 403).
+  if (editId && editing && editing.ownerEmail !== currentUser.email) {
+    return (
+      <main className="mx-auto max-w-2xl px-4 py-16 text-center sm:px-6">
+        <h1 className="font-display text-3xl font-bold text-pine-950">Only the owner can edit this profile</h1>
+        <p className="mt-2 text-sm text-stone-600">
+          Missing alerts and profile details for {editing.name} are managed by the registered owner.
+        </p>
+        <button
+          onClick={() => navigate("pet", editing.id)}
+          className="mt-6 cursor-pointer rounded-xl bg-pine-900 px-6 py-3 text-sm font-bold text-white hover:bg-pine-800"
+        >
+          View {editing.name}'s profile instead
+        </button>
+      </main>
+    );
+  }
 
   const set = (k, v) => {
     setForm((f) => ({ ...f, [k]: v }));

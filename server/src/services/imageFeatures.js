@@ -2,7 +2,10 @@ const crypto = require("crypto");
 const jpeg = require("jpeg-js");
 const { PNG } = require("pngjs");
 
-const EMBEDDING_VERSION = 2;
+// v3: micro-biometric space redesigned around grayscale texture/spatial layout
+// (no absolute coat color) so same-coat strangers separate; stored v2 micro
+// vectors are incomparable and reindex regenerates both spaces.
+const EMBEDDING_VERSION = 3;
 const EMBEDDING_DIM = 128;
 const WORK_SIZE = 64;
 const REGION_DIM = 24;
@@ -15,6 +18,18 @@ const MARKING_WEIGHT = 1.5;
 const BODY_WEIGHT = 1.0;
 const CONTOUR_WEIGHT = 1.0;
 const PROJECTION_SEED = 0x5bd1e995;
+
+// Fine-grained biometric layer: localized high-resolution crops of the unique
+// identity regions. Order matters — unique textures lead so the fused micro
+// vector and its spatial weights stay aligned (see MICRO_SPATIAL_WEIGHTS).
+const BIOMETRIC_REGIONS = ["facial_mask", "muzzle", "ear_pattern", "coat_markings"];
+const MICRO_DESC_DIM = 48;
+const MICRO_GRID_SIDE = 4;
+const MICRO_GRID_CELLS = MICRO_GRID_SIDE * MICRO_GRID_SIDE; // 16
+const MICRO_GRID_EMPHASIS = 8.0;
+const MICRO_REGION_DIM = 64;
+const MICRO_EMBEDDING_DIM = MICRO_REGION_DIM * BIOMETRIC_REGIONS.length; // 256
+const MICRO_PROJECTION_SEED = 0x1b873593;
 
 /**
  * Local segmentation + multi-region feature extraction.
@@ -33,8 +48,11 @@ function extractLocalFeatures(buffer, mimeType = "image/jpeg") {
   if (!decoded) {
     // Unsupported codec (e.g. webp/gif): deterministic byte-level descriptor
     // in the same projection space. Identical files still match at 100%.
+    const micro = bytesMicroEmbedding(input);
     return {
       embedding: projectToEmbedding(bytesDescriptor(input)),
+      microEmbedding: micro.microEmbedding,
+      regionEmbeddings: micro.regions,
       segmentation: { applied: false, method: "bytes", fgFraction: 1, bbox: null },
       version: EMBEDDING_VERSION,
     };
@@ -55,8 +73,11 @@ function extractFromCrop(buffer, mimeType, box) {
   }
   const decoded = decodeImage(input, mimeType);
   if (!decoded) {
+    const micro = bytesMicroEmbedding(input);
     return {
       embedding: projectToEmbedding(bytesDescriptor(input)),
+      microEmbedding: micro.microEmbedding,
+      regionEmbeddings: micro.regions,
       segmentation: { applied: false, method: "bytes", fgFraction: 1, bbox: null },
       version: EMBEDDING_VERSION,
     };
@@ -79,8 +100,11 @@ function extractFromCrop(buffer, mimeType, box) {
 function featuresFromGrid(grid, method) {
   const seg = segmentSubject(grid);
   const descriptor = describeSubject(grid, seg);
+  const biometric = extractBiometricFeatures(grid, seg);
   return {
     embedding: projectToEmbedding(descriptor),
+    microEmbedding: biometric.microEmbedding,
+    regionEmbeddings: biometric.regions,
     segmentation: {
       applied: seg.applied,
       method,
@@ -483,6 +507,344 @@ function sobel(lum, size) {
 }
 
 // ---------------------------------------------------------------------------
+// Fine-grained biometric crops: facial mask, muzzle/nose print, ear pattern,
+// distinctive coat markings. Each crop gets a texture-sensitive descriptor
+// (local contrast, gradient variance, LBP non-uniformity, high-frequency
+// energy) projected into its own fixed space, then concatenated into one
+// high-dimensional normalized micro vector. Twins and lookalikes share the
+// global body embedding but diverge here.
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract per-region biometric embeddings + the fused micro vector from an
+ * already-decoded grid and its subject segmentation.
+ * Returns { regions: {facial_mask, muzzle, ear_pattern, coat_markings},
+ *           microEmbedding }.
+ */
+function extractBiometricFeatures(grid, seg) {
+  const { size } = grid;
+  const lum = new Float32Array(size * size);
+  for (let i = 0; i < lum.length; i++) {
+    lum[i] = 0.299 * grid.r[i] + 0.587 * grid.g[i] + 0.114 * grid.b[i];
+  }
+  const { mag, ori } = sobel(lum, size);
+  const cells = biometricCells(grid, seg, lum);
+  const ctx = { grid, lum, mag, ori, size };
+  const regions = {};
+  BIOMETRIC_REGIONS.forEach((name, idx) => {
+    regions[name] = projectMicroDescriptor(describeMicroCells(ctx, cells[name]), idx);
+  });
+  return { regions, microEmbedding: concatMicroRegions(regions) };
+}
+
+/** Locate the four biometric crops inside the subject bounding box. */
+function biometricCells(grid, seg, lum) {
+  const { size } = grid;
+  const { bbox } = seg;
+  const inMask = (o) => seg.mask[o] === 1;
+  const body = [];
+  for (let y = bbox.y0; y <= bbox.y1; y++) {
+    for (let x = bbox.x0; x <= bbox.x1; x++) {
+      const o = y * size + x;
+      if (inMask(o)) body.push(o);
+    }
+  }
+  const all = body.length ? body : allCells(size);
+  const meanLum = all.reduce((s, o) => s + lum[o], 0) / all.length;
+  const bw = Math.max(1, bbox.x1 - bbox.x0 + 1);
+  const bh = Math.max(1, bbox.y1 - bbox.y0 + 1);
+  const cx = (bbox.x0 + bbox.x1) / 2;
+  const rows = {
+    facial_mask: all.filter((o) => {
+      const x = o % size;
+      const y = Math.floor(o / size);
+      return (
+        y <= bbox.y0 + Math.floor(bh * 0.42) &&
+        x >= bbox.x0 + Math.floor(bw * 0.19) &&
+        x <= bbox.x1 - Math.floor(bw * 0.19)
+      );
+    }),
+    muzzle: all.filter((o) => {
+      const x = o % size;
+      const y = Math.floor(o / size);
+      return (
+        y >= bbox.y0 + Math.floor(bh * 0.28) &&
+        y <= bbox.y0 + Math.floor(bh * 0.48) &&
+        Math.abs(x - cx) <= Math.ceil(bw * 0.18)
+      );
+    }),
+    ear_pattern: all.filter((o) => {
+      const x = o % size;
+      const y = Math.floor(o / size);
+      return (
+        y <= bbox.y0 + Math.floor(bh * 0.28) &&
+        (x <= bbox.x0 + Math.floor(bw * 0.28) || x >= bbox.x1 - Math.floor(bw * 0.28))
+      );
+    }),
+    coat_markings: all.filter((o) => {
+      const mx = Math.max(grid.r[o], grid.g[o], grid.b[o]);
+      const mn = Math.min(grid.r[o], grid.g[o], grid.b[o]);
+      const sat = (mx - mn) / (mx + 1e-6);
+      return sat > 0.22 || Math.abs(lum[o] - meanLum) > 22;
+    }),
+  };
+  const topBand = all.filter((o) => Math.floor(o / size) <= bbox.y0 + Math.floor(bh * 0.3));
+  const fallbacks = {
+    facial_mask: all,
+    muzzle: rows.facial_mask.length >= 12 ? rows.facial_mask : all,
+    ear_pattern: topBand.length >= 12 ? topBand : all,
+    coat_markings: all,
+  };
+  const out = {};
+  for (const name of BIOMETRIC_REGIONS) {
+    out[name] = rows[name].length >= 12 ? rows[name] : fallbacks[name].slice();
+    if (!out[name].length) out[name] = all.slice();
+  }
+  return out;
+}
+
+/**
+ * 48-d micro-texture descriptor — deliberately grayscale/spatial, with NO
+ * absolute coat color, so two animals sharing fur color still separate on
+ * marking texture and layout: orientation hist (8) + multi-threshold edge
+ * density (3) + gradient mean/std (2) + local contrast (1) + LBP
+ * non-uniformity (1) + high-frequency energy (1) + LBP count hist (5) +
+ * dark/bright spot fractions (3) + marking centroid offset (2) + vertical /
+ * horizontal asymmetry (2) + luminance std (1) + region fill (1) +
+ * orientation entropy (1) + quadrant marking imbalance (1) + a 4x4 spatial
+ * grid (16) of per-bin dark-marking fractions. The grid is emphasized x8:
+ * WHERE the unique markings sit is the strongest twin/stranger signal, while
+ * aggregate ratios alone saturate near 100% for same-coat animals.
+ */
+function describeMicroCells(ctx, cells) {
+  const { lum, mag, ori, size } = ctx;
+  const desc = new Array(MICRO_DESC_DIM).fill(0);
+  if (!cells.length) return desc;
+  const n = cells.length;
+  const meanLum = cells.reduce((s, o) => s + lum[o], 0) / n;
+  let sumMag = 0;
+  let sumMag2 = 0;
+  let contrast = 0;
+  let edgeLo = 0;
+  let edgeMid = 0;
+  let edgeHi = 0;
+  let hiFreq = 0;
+  let nonUniform = 0;
+  let lbpCount = 0;
+  let dark = 0;
+  let darkDeep = 0;
+  let bright = 0;
+  let darkX = 0;
+  let darkY = 0;
+  let lumL = 0;
+  let cntL = 0;
+  let lumR = 0;
+  let cntR = 0;
+  let lumT = 0;
+  let cntT = 0;
+  let lumB = 0;
+  let cntB = 0;
+  let minX = size;
+  let maxX = -1;
+  let minY = size;
+  let maxY = -1;
+  const ohist = new Array(8).fill(0);
+  const lbpHist = new Array(5).fill(0);
+  let omag = 0;
+  for (const o of cells) {
+    const x = o % size;
+    const y = Math.floor(o / size);
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    ohist[ori[o]] += mag[o];
+    omag += mag[o];
+    sumMag += mag[o];
+    sumMag2 += mag[o] * mag[o];
+    contrast += Math.abs(lum[o] - meanLum);
+    if (mag[o] > 18) edgeLo += 1;
+    if (mag[o] > 50) edgeMid += 1;
+    if (mag[o] > 100) edgeHi += 1;
+    if (mag[o] > 60) hiFreq += 1;
+    if (lum[o] < meanLum - 30) {
+      dark += 1;
+      darkX += x;
+      darkY += y;
+      if (lum[o] < meanLum - 60) darkDeep += 1;
+    }
+    if (lum[o] > meanLum + 40) bright += 1;
+    if (x < size / 2) {
+      lumL += lum[o];
+      cntL += 1;
+    } else {
+      lumR += lum[o];
+      cntR += 1;
+    }
+    if (y < size / 2) {
+      lumT += lum[o];
+      cntT += 1;
+    } else {
+      lumB += lum[o];
+      cntB += 1;
+    }
+    // 4-neighbor LBP: brighter-neighbor count + cyclic bit transitions.
+    if (x > 0 && x < size - 1 && y > 0 && y < size - 1) {
+      const c = lum[o];
+      const bits = [
+        lum[o - size] > c ? 1 : 0,
+        lum[o + 1] > c ? 1 : 0,
+        lum[o + size] > c ? 1 : 0,
+        lum[o - 1] > c ? 1 : 0,
+      ];
+      lbpHist[bits[0] + bits[1] + bits[2] + bits[3]] += 1;
+      let transitions = 0;
+      for (let k = 0; k < 4; k++) {
+        if (bits[k] !== bits[(k + 1) % 4]) transitions += 1;
+      }
+      if (transitions > 2) nonUniform += 1;
+      lbpCount += 1;
+    }
+  }
+  let vlum = 0;
+  for (const o of cells) vlum += (lum[o] - meanLum) ** 2;
+  const meanMag = sumMag / n;
+  const varMag = Math.max(0, sumMag2 / n - meanMag * meanMag);
+  const ccx = (minX + maxX) / 2;
+  const ccy = (minY + maxY) / 2;
+  // Quadrant imbalance of dark markings around the cell-bbox center.
+  let qTL = 0;
+  let qTR = 0;
+  let qBL = 0;
+  let qBR = 0;
+  for (const o of cells) {
+    if (lum[o] >= meanLum - 30) continue;
+    const x = o % size;
+    const y = Math.floor(o / size);
+    if (x <= ccx) {
+      if (y <= ccy) qTL += 1;
+      else qBL += 1;
+    } else if (y <= ccy) qTR += 1;
+    else qBR += 1;
+  }
+  let entropy = 0;
+  if (omag > 0) {
+    for (let i = 0; i < 8; i++) {
+      const p = ohist[i] / omag;
+      if (p > 0) entropy -= p * Math.log(p);
+    }
+  }
+  const bboxArea = Math.max(1, (maxX - minX + 1) * (maxY - minY + 1));
+  // 4x4 spatial grid of dark-marking layout over the region cell bbox:
+  // per-bin fraction of cells darker than the region mean, so different spot
+  // layouts diverge even when aggregate ratios match. Coarse bins stay robust
+  // to small mask shifts (finer grids were tried and rejected: 6x6/8x8 bins
+  // re-partition on 1-2 cell boundary shifts and collapse true matches).
+  // Mean deviation was also tried and failed: uniform pixel noise dominates
+  // it, hiding the spot layout.
+  const gridDark = new Array(MICRO_GRID_CELLS).fill(0);
+  const gridCnt = new Array(MICRO_GRID_CELLS).fill(0);
+  const bwCells = Math.max(1, maxX - minX + 1);
+  const bhCells = Math.max(1, maxY - minY + 1);
+  for (const o of cells) {
+    const gx = Math.min(MICRO_GRID_SIDE - 1, Math.floor(((o % size) - minX) / bwCells * MICRO_GRID_SIDE));
+    const gy = Math.min(MICRO_GRID_SIDE - 1, Math.floor((Math.floor(o / size) - minY) / bhCells * MICRO_GRID_SIDE));
+    const bin = gy * MICRO_GRID_SIDE + gx;
+    if (lum[o] < meanLum - 30) gridDark[bin] += 1;
+    gridCnt[bin] += 1;
+  }
+  for (let i = 0; i < 8; i++) desc[i] = omag > 0 ? ohist[i] / omag : 0;
+  desc[8] = edgeLo / n;
+  desc[9] = edgeMid / n;
+  desc[10] = edgeHi / n;
+  desc[11] = meanMag / 255;
+  desc[12] = Math.sqrt(varMag) / 255;
+  desc[13] = contrast / n / 255;
+  desc[14] = lbpCount > 0 ? nonUniform / lbpCount : 0;
+  desc[15] = hiFreq / n;
+  for (let i = 0; i < 5; i++) desc[16 + i] = lbpCount > 0 ? lbpHist[i] / lbpCount : 0;
+  desc[21] = dark / n;
+  desc[22] = darkDeep / n;
+  desc[23] = bright / n;
+  desc[24] = dark > 0 ? darkX / dark / size - ccx / size : 0;
+  desc[25] = dark > 0 ? darkY / dark / size - ccy / size : 0;
+  desc[26] = cntL && cntR ? Math.abs(lumL / cntL - lumR / cntR) / 255 : 0;
+  desc[27] = cntT && cntB ? Math.abs(lumT / cntT - lumB / cntB) / 255 : 0;
+  desc[28] = Math.sqrt(vlum / n) / 255;
+  desc[29] = Math.min(1, n / bboxArea);
+  desc[30] = entropy / Math.log(8);
+  desc[31] = dark > 0 ? Math.abs(qTL + qBR - qTR - qBL) / dark : 0;
+  for (let i = 0; i < MICRO_GRID_CELLS; i++) {
+    desc[32 + i] = gridCnt[i] > 0 ? (gridDark[i] / gridCnt[i]) * MICRO_GRID_EMPHASIS : 0;
+  }
+  return desc;
+}
+
+/** Concatenate per-region vectors in BIOMETRIC_REGIONS order + normalize. */
+function concatMicroRegions(regions) {
+  const parts = BIOMETRIC_REGIONS.map((name) => {
+    const v = regions[name];
+    if (!Array.isArray(v) || !v.length) return new Array(MICRO_REGION_DIM).fill(0);
+    if (v.length === MICRO_REGION_DIM) return v.slice();
+    if (v.length > MICRO_REGION_DIM) return v.slice(0, MICRO_REGION_DIM);
+    const out = new Array(MICRO_REGION_DIM);
+    for (let i = 0; i < MICRO_REGION_DIM; i++) out[i] = Number(v[i % v.length]) || 0;
+    return out;
+  });
+  return normalize(parts.flat());
+}
+
+/** Deterministic per-region micro vectors for undecodable images. */
+function bytesMicroEmbedding(input) {
+  const regions = {};
+  BIOMETRIC_REGIONS.forEach((name, r) => {
+    const desc = new Array(MICRO_DESC_DIM);
+    for (let i = 0; i < MICRO_DESC_DIM; i++) {
+      const h = crypto.createHash("sha256").update(input).update(`micro:${name}:${i}`).digest();
+      desc[i] = h.readInt32BE((i * 7) % 28) / 2147483648;
+    }
+    regions[name] = projectMicroDescriptor(desc, r);
+  });
+  return { regions, microEmbedding: concatMicroRegions(regions) };
+}
+
+const microProjectionMatrices = {};
+
+function getMicroProjection(regionIndex) {
+  if (microProjectionMatrices[regionIndex]) return microProjectionMatrices[regionIndex];
+  const rand = mulberry32((MICRO_PROJECTION_SEED + regionIndex * 0x9e3779b9) >>> 0);
+  const gauss = () => {
+    let u = 0;
+    let v = 0;
+    while (u === 0) u = rand();
+    while (v === 0) v = rand();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  };
+  const matrix = [];
+  for (let i = 0; i < MICRO_REGION_DIM; i++) {
+    const row = new Array(MICRO_DESC_DIM);
+    for (let j = 0; j < MICRO_DESC_DIM; j++) row[j] = gauss();
+    matrix.push(row);
+  }
+  microProjectionMatrices[regionIndex] = matrix;
+  return matrix;
+}
+
+function projectMicroDescriptor(descriptor, regionIndex) {
+  const matrix = getMicroProjection(regionIndex);
+  const mean = descriptor.reduce((s, v) => s + v, 0) / descriptor.length;
+  const scale = 1 / Math.sqrt(MICRO_DESC_DIM);
+  const out = new Array(MICRO_REGION_DIM);
+  for (let i = 0; i < MICRO_REGION_DIM; i++) {
+    let sum = 0;
+    const row = matrix[i];
+    for (let j = 0; j < MICRO_DESC_DIM; j++) sum += row[j] * (descriptor[j] - mean);
+    out[i] = sum * scale;
+  }
+  return normalize(out);
+}
+
+// ---------------------------------------------------------------------------
 // Weighted fusion → fixed projection → normalized embedding.
 // ---------------------------------------------------------------------------
 
@@ -581,8 +943,15 @@ module.exports = {
   extractFromCrop,
   prepareApiImage,
   projectToEmbedding,
+  extractBiometricFeatures,
+  concatMicroRegions,
+  projectMicroDescriptor,
   EMBEDDING_VERSION,
   EMBEDDING_DIM,
   FACE_WEIGHT,
   MARKING_WEIGHT,
+  BIOMETRIC_REGIONS,
+  MICRO_DESC_DIM,
+  MICRO_REGION_DIM,
+  MICRO_EMBEDDING_DIM,
 };

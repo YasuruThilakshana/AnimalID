@@ -59,6 +59,12 @@ const Animal = sequelize.define(
       allowNull: false,
       defaultValue: "",
     },
+    lostLocation: {
+      type: DataTypes.STRING(160),
+      allowNull: false,
+      defaultValue: "",
+      field: "lost_location",
+    },
     marks: {
       type: DataTypes.TEXT,
       allowNull: false,
@@ -104,6 +110,16 @@ const Animal = sequelize.define(
     embedding: {
       type: DataTypes.JSON,
       allowNull: true,
+    },
+    globalEmbedding: {
+      type: DataTypes.JSON,
+      allowNull: true,
+      field: "global_embedding",
+    },
+    microBiometricEmbedding: {
+      type: DataTypes.JSON,
+      allowNull: true,
+      field: "micro_biometric_embedding",
     },
     embeddingVer: {
       type: DataTypes.INTEGER,

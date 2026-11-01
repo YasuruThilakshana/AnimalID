@@ -122,10 +122,12 @@ describe("segmentation + weighted feature extraction", () => {
 describe("scan endpoint", () => {
   it("always returns ranked top matches; same image scores 95%+ via best view", async () => {
     const queryPng = syntheticPNG(7);
-    const queryVec = extractLocalFeatures(queryPng, "image/png").embedding;
+    const queryFeat = extractLocalFeatures(queryPng, "image/png");
+    const queryVec = queryFeat.embedding;
+    const queryMicro = queryFeat.microEmbedding;
     const otherVec = extractLocalFeatures(syntheticPNG(99), "image/png").embedding;
 
-    const mk = (id, embedding, ver, angleEmbeddings = null) => ({
+    const mk = (id, embedding, ver, angleEmbeddings = null, micro = null) => ({
       id,
       tagNumber: `TAG-001-000${id}`,
       name: `Pet${id}`,
@@ -135,12 +137,15 @@ describe("scan endpoint", () => {
       embedding,
       embeddingVer: ver,
       angleEmbeddings,
+      microBiometricEmbedding: micro,
       toJSON() {
-        return { id, tagNumber: this.tagNumber, name: this.name, embedding, embeddingVer: ver, angleEmbeddings };
+        // Mirror the real Sequelize model: toJSON carries every attribute,
+        // including the species the scanner scopes matches by.
+        return { id, tagNumber: this.tagNumber, name: this.name, species: "Dog", breed: "Mix", status: "safe", embedding, embeddingVer: ver, angleEmbeddings, microBiometricEmbedding: micro };
       },
     });
     const animals = [
-      mk(1, queryVec, EMBEDDING_VERSION), // fused identical
+      mk(1, queryVec, EMBEDDING_VERSION, null, queryMicro), // fused identical
       mk(2, otherVec, EMBEDDING_VERSION, { left: queryVec, right: otherVec }), // one angle identical
       mk(3, queryVec, 1), // stale feature space: excluded
       mk(4, null, EMBEDDING_VERSION), // no embedding: excluded

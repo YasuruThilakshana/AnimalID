@@ -132,7 +132,7 @@ export default function Dashboard() {
                       )}
                       <span className="min-w-0">
                         <span className="block truncate text-sm font-bold">{p.name}</span>
-                        <span className="block truncate text-xs text-stone-300">{p.location}</span>
+                        <span className="block truncate text-xs text-stone-300">{p.lostLocation || p.location}</span>
                       </span>
                     </button>
                   </li>

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { PetAvatar, ScanCode, StatusPill } from "../components/ui";
 import { apiError } from "../lib/api.js";
-import { petDisplayId, petPhoto, timeAgo, useStore } from "../lib/store";
+import { openAssistant, petDisplayId, petPhoto, timeAgo, toAssistantAnimal, useStore } from "../lib/store";
 
 const ANGLE_LABELS = { front: "Front", left: "Left side", right: "Right side", mark: "Mark" };
 
@@ -14,6 +14,8 @@ export default function PetProfile() {
   const [sighting, setSighting] = useState({ place: "", note: "" });
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
+  // Lost-alert draft: null = form closed, otherwise { place, contact, home }.
+  const [alertForm, setAlertForm] = useState(null);
 
   if (!pet) {
     return (
@@ -48,6 +50,58 @@ export default function PetProfile() {
       toast(status === "lost" ? `Lost alert broadcast for ${pet.name}.` : `${pet.name} marked as ${status}.`);
     } catch (err) {
       toast(apiError(err, "Could not update the status."), "warn");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Owner-only: broadcast a missing alert pinned to the incident location
+  // (independent of the registered home address), with contact + home
+  // address confirmed at report time.
+  const reportLost = async ({ place, contact, home }) => {
+    const lostLocation = place.trim() || pet.location;
+    setBusy(true);
+    try {
+      await savePet({
+        ...pet,
+        status: "lost",
+        lostLocation,
+        contact: contact.trim() || pet.contact,
+        location: home.trim() || pet.location,
+        timeline: [...(pet.timeline || []), { t: Date.now(), text: `Reported lost — last seen in ${lostLocation}` }],
+      });
+      logActivity(`${pet.name} was reported lost`, pet.ownerEmail);
+      toast(`Lost alert broadcast for ${pet.name}.`);
+      setAlertForm(null);
+    } catch (err) {
+      toast(apiError(err, "Could not broadcast the alert."), "warn");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Owner-only: correct the incident location on an active alert. The history
+  // entry deliberately avoids the word "lost" so the missing-since clock keeps
+  // pointing at the original report.
+  const updateAlertLocation = async (place) => {
+    const lostLocation = place.trim();
+    if (!lostLocation) return toast("Enter the last-seen location.", "warn");
+    if (lostLocation === (pet.lostLocation || "")) {
+      setAlertForm(null);
+      return;
+    }
+    setBusy(true);
+    try {
+      await savePet({
+        ...pet,
+        lostLocation,
+        timeline: [...(pet.timeline || []), { t: Date.now(), text: "Last seen location corrected" }],
+      });
+      logActivity(`${pet.name}'s alert location was updated`, pet.ownerEmail);
+      toast("Lost alert location updated.");
+      setAlertForm(null);
+    } catch (err) {
+      toast(apiError(err, "Could not update the alert."), "warn");
     } finally {
       setBusy(false);
     }
@@ -110,7 +164,7 @@ export default function PetProfile() {
       {pet.status === "lost" && (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-ember-600 px-5 py-4 text-white">
           <p className="text-sm font-bold">
-            ⚠ {pet.name} is missing — last seen in {pet.location}. If you spot them, report it below.
+            ⚠ {pet.name} is missing — last seen in {pet.lostLocation || pet.location}. If you spot them, report it below.
           </p>
           <a href="#sighting" className="rounded-lg bg-white px-4 py-2 text-sm font-bold text-ember-700">
             Report a sighting
@@ -167,7 +221,12 @@ export default function PetProfile() {
             {[
               ["AnimalID", displayId, true],
               ["Color", pet.color + (pet.weight ? ` · ${pet.weight}` : "")],
-              ["Location", pet.location],
+              ...(pet.status === "lost"
+                ? [
+                    ["Last seen / lost location", pet.lostLocation || pet.location],
+                    ["Registered home address", pet.location],
+                  ]
+                : [["Registered home address", pet.location]]),
               ["Tag number", pet.tagNumber || displayId, true],
               ["Vet clinic", pet.vet || "Not recorded"],
               ["Owner", `${pet.ownerName} · ${pet.contact}`],
@@ -284,6 +343,12 @@ export default function PetProfile() {
             >
               Call about {pet.name}
             </a>
+            <button
+              onClick={() => openAssistant(toAssistantAnimal(pet))}
+              className="mt-2 block w-full cursor-pointer rounded-xl bg-pine-900 px-4 py-2.5 text-center text-sm font-bold text-white hover:bg-pine-800"
+            >
+              Ask Ash about {pet.name}
+            </button>
           </div>
 
           {isOwner && (
@@ -298,21 +363,89 @@ export default function PetProfile() {
                 >
                   Edit profile
                 </button>
-                {pet.status !== "lost" ? (
+                {alertForm !== null ? (
+                  <div className="rounded-xl bg-white/10 p-3">
+                    <label className="mb-1 block text-xs font-bold text-stone-300" htmlFor="alert-place">
+                      Last seen at
+                    </label>
+                    <input
+                      id="alert-place"
+                      value={alertForm.place}
+                      onChange={(e) => setAlertForm({ ...alertForm, place: e.target.value })}
+                      placeholder="Park, street, landmark…"
+                      className="w-full rounded-lg bg-white px-3 py-2 text-sm font-semibold text-pine-950 focus:outline-none"
+                    />
+                    <p className="mt-1 text-[11px] text-stone-400">
+                      Pinpoint where {pet.name} went missing — it can differ from the home address.
+                    </p>
+                    {pet.status !== "lost" && (
+                      <>
+                        <label className="mt-2 mb-1 block text-xs font-bold text-stone-300" htmlFor="alert-contact">
+                          Contact number for finders
+                        </label>
+                        <input
+                          id="alert-contact"
+                          value={alertForm.contact}
+                          onChange={(e) => setAlertForm({ ...alertForm, contact: e.target.value })}
+                          placeholder="(555) 010-2030"
+                          className="w-full rounded-lg bg-white px-3 py-2 text-sm font-semibold text-pine-950 focus:outline-none"
+                        />
+                        <label className="mt-2 mb-1 block text-xs font-bold text-stone-300" htmlFor="alert-home">
+                          Registered home address
+                        </label>
+                        <input
+                          id="alert-home"
+                          value={alertForm.home}
+                          onChange={(e) => setAlertForm({ ...alertForm, home: e.target.value })}
+                          placeholder="Street, city"
+                          className="w-full rounded-lg bg-white px-3 py-2 text-sm font-semibold text-pine-950 focus:outline-none"
+                        />
+                      </>
+                    )}
+                    <div className="mt-2 flex gap-2">
+                      <button
+                        onClick={() =>
+                          pet.status === "lost" ? updateAlertLocation(alertForm.place) : reportLost(alertForm)
+                        }
+                        disabled={busy}
+                        className="flex-1 cursor-pointer rounded-lg bg-ember-500 px-3 py-2 text-xs font-bold hover:bg-ember-600 disabled:opacity-60"
+                      >
+                        {pet.status === "lost" ? "Save lost location" : "Broadcast lost alert"}
+                      </button>
+                      <button
+                        onClick={() => setAlertForm(null)}
+                        className="flex-1 cursor-pointer rounded-lg bg-white/15 px-3 py-2 text-xs font-bold hover:bg-white/25"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : pet.status !== "lost" ? (
                   <button
-                    onClick={() => setStatus("lost")}
+                    onClick={() => setAlertForm({ place: pet.location || "", contact: pet.contact || "", home: pet.location || "" })}
                     disabled={busy}
                     className="w-full cursor-pointer rounded-xl bg-ember-500 px-4 py-2.5 text-sm font-bold hover:bg-ember-600 disabled:opacity-60"
                   >
                     Report as lost
                   </button>
                 ) : (
-                  <button
-                    onClick={() => navigate("alerts", null, { poster: pet.id })}
-                    className="w-full cursor-pointer rounded-xl bg-amber-400 px-4 py-2.5 text-sm font-bold text-pine-950 hover:bg-amber-300"
-                  >
-                    Create lost poster
-                  </button>
+                  <>
+                    <button
+                      onClick={() => navigate("alerts", null, { poster: pet.id })}
+                      className="w-full cursor-pointer rounded-xl bg-amber-400 px-4 py-2.5 text-sm font-bold text-pine-950 hover:bg-amber-300"
+                    >
+                      Create lost poster
+                    </button>
+                    <button
+                      onClick={() =>
+                        setAlertForm({ place: pet.lostLocation || pet.location || "", contact: pet.contact || "", home: pet.location || "" })
+                      }
+                      disabled={busy}
+                      className="w-full cursor-pointer rounded-xl bg-white/10 px-4 py-2.5 text-sm font-bold hover:bg-white/20 disabled:opacity-60"
+                    >
+                      Update lost location
+                    </button>
+                  </>
                 )}
                 {pet.status === "lost" && (
                   <button
