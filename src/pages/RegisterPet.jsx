@@ -221,7 +221,7 @@ export default function RegisterPet() {
           },
           files,
         );
-        logActivity(`${updated.name}'s profile was updated`, currentUser.email);
+        logActivity(`${updated.name}'s profile was updated`, currentUser.email, "update");
         toast(`${updated.name}'s profile is up to date.`);
         navigate("pet", updated.id);
         return;
@@ -236,7 +236,7 @@ export default function RegisterPet() {
         },
         files,
       );
-      logActivity(`${pet.name} was registered (${petDisplayId(pet)})`, currentUser.email);
+      logActivity(`${pet.name} was registered (${petDisplayId(pet)})`, currentUser.email, "register");
       try {
         localStorage.removeItem(DRAFT_KEY);
       } catch {

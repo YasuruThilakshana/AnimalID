@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import PetCard from "../components/PetCard";
 import { EmptyState, PetAvatar } from "../components/ui";
+import { filterUserActivity } from "../lib/activity.js";
 import { petPhoto, timeAgo, useStore } from "../lib/store";
 
 export default function Dashboard() {
@@ -15,7 +16,7 @@ export default function Dashboard() {
   const mine = pets.filter((p) => p.ownerEmail === currentUser.email);
   const lost = mine.filter((p) => p.status === "lost");
   const sightings = mine.reduce((n, p) => n + (p.sightings?.length || 0), 0);
-  const myActivity = activity.filter((a) => !a.email || a.email === currentUser.email).slice(0, 6);
+  const myActivity = filterUserActivity(activity, currentUser.email, 6);
   const nearbyLost = pets.filter((p) => p.status === "lost" && p.ownerEmail !== currentUser.email).slice(0, 4);
 
   return (
