@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import PetCard from "../components/PetCard";
 import { PetAvatar, ScanCode, StatusPill } from "../components/ui";
+import { filterRecoveryFeed } from "../lib/activity.js";
 import { petDisplayId, petPhoto, timeAgo, useStore } from "../lib/store";
 
 function HeroSearch() {
@@ -150,6 +151,7 @@ export default function Home() {
   const lostPets = pets.filter((p) => p.status === "lost");
   const foundPets = pets.filter((p) => p.status === "found");
   const tickerPet = pets.find((p) => p.status === "lost") || pets[0];
+  const recoveryFeed = filterRecoveryFeed(activity, 3);
 
   return (
     <main>
@@ -192,8 +194,8 @@ export default function Home() {
                 Live recovery feed
               </p>
               <ul className="mt-2 space-y-2 text-sm">
-                {(activity.length
-                  ? activity.slice(0, 3)
+                {(recoveryFeed.length
+                  ? recoveryFeed
                   : [{ t: Date.now(), text: "No recent activity yet — register a pet to get started." }]
                 ).map((a, i) => (
                   <li key={i} className="flex items-start justify-between gap-3 border-b border-white/10 pb-2 last:border-0 last:pb-0">

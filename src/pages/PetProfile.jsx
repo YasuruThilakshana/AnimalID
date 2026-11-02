@@ -46,7 +46,11 @@ export default function PetProfile() {
     setBusy(true);
     try {
       await savePet({ ...pet, status, timeline: [...(pet.timeline || []), { t: Date.now(), text: label }] });
-      logActivity(`${pet.name} was ${status === "safe" ? "marked safe" : `reported ${status}`}`, pet.ownerEmail);
+      logActivity(
+        `${pet.name} was ${status === "safe" ? "marked safe" : `reported ${status}`}`,
+        pet.ownerEmail,
+        status === "lost" ? "lost" : status === "found" ? "found" : "recovery",
+      );
       toast(status === "lost" ? `Lost alert broadcast for ${pet.name}.` : `${pet.name} marked as ${status}.`);
     } catch (err) {
       toast(apiError(err, "Could not update the status."), "warn");
@@ -70,7 +74,7 @@ export default function PetProfile() {
         location: home.trim() || pet.location,
         timeline: [...(pet.timeline || []), { t: Date.now(), text: `Reported lost — last seen in ${lostLocation}` }],
       });
-      logActivity(`${pet.name} was reported lost`, pet.ownerEmail);
+      logActivity(`${pet.name} was reported lost`, pet.ownerEmail, "lost");
       toast(`Lost alert broadcast for ${pet.name}.`);
       setAlertForm(null);
     } catch (err) {
@@ -97,7 +101,7 @@ export default function PetProfile() {
         lostLocation,
         timeline: [...(pet.timeline || []), { t: Date.now(), text: "Last seen location corrected" }],
       });
-      logActivity(`${pet.name}'s alert location was updated`, pet.ownerEmail);
+      logActivity(`${pet.name}'s alert location was updated`, pet.ownerEmail, "lost");
       toast("Lost alert location updated.");
       setAlertForm(null);
     } catch (err) {
@@ -111,7 +115,7 @@ export default function PetProfile() {
     setBusy(true);
     try {
       await deletePet(pet.id);
-      logActivity(`${pet.name} (${displayId}) was removed`, currentUser.email);
+      logActivity(`${pet.name} (${displayId}) was removed`, currentUser.email, "remove");
       toast(`${pet.name}'s profile was deleted.`);
       navigate("dashboard");
     } catch (err) {
@@ -127,7 +131,7 @@ export default function PetProfile() {
     setBusy(true);
     try {
       await reportSighting(pet.id, sighting.place, sighting.note);
-      logActivity(`Sighting of ${pet.name} at ${sighting.place.trim()}`, currentUser?.email);
+      logActivity(`Sighting of ${pet.name} at ${sighting.place.trim()}`, currentUser?.email, "sighting");
       setSighting({ place: "", note: "" });
       toast("Sighting reported. The owner has been notified.");
     } catch (err) {

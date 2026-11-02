@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import api, { apiError, getAuthToken, setAuthToken } from "./api.js";
+import { inferActivityKind } from "./activity.js";
 
 const LS_ACTIVITY = "animalid.activity";
 
@@ -32,6 +33,10 @@ const SPECIES_COLORS = {
   Cat: ["#7c4a1e", "#b98a1f"],
   Bird: ["#1d5c7c", "#2f8fb5"],
   Rabbit: ["#6d4a7c", "#9a6fb0"],
+  Reptile: ["#2f6b3a", "#5da85f"],
+  Fish: ["#14566e", "#38a3c4"],
+  Farm: ["#8a5a24", "#c99a4b"],
+  Exotic: ["#5c2f6b", "#a06bc0"],
   Elephant: ["#3d4b5c", "#7b8aa0"],
   Other: ["#4a5568", "#718096"],
 };
@@ -40,7 +45,7 @@ export function speciesGradient(species) {
   return SPECIES_COLORS[species] || SPECIES_COLORS.Other;
 }
 
-export const SPECIES_OPTIONS = ["Dog", "Cat", "Elephant", "Bird", "Rabbit", "Other"];
+export const SPECIES_OPTIONS = ["Dog", "Cat", "Bird", "Rabbit", "Reptile", "Fish", "Farm", "Exotic", "Elephant", "Other"];
 
 /** Parse location.hash into { name, param, query } */
 export function parseHash() {
@@ -128,8 +133,11 @@ export function StoreProvider({ children }) {
     }, 3400);
   }, []);
 
-  const logActivity = useCallback((text, email) => {
-    setActivity((prev) => [{ t: Date.now(), text, email: email || null }, ...prev].slice(0, 80));
+  const logActivity = useCallback((text, email, kind) => {
+    const resolvedKind = kind || inferActivityKind(text);
+    setActivity((prev) =>
+      [{ t: Date.now(), text, email: email || null, kind: resolvedKind }, ...prev].slice(0, 80),
+    );
   }, []);
 
   const fetchNotifications = useCallback(async () => {
@@ -243,7 +251,7 @@ export function StoreProvider({ children }) {
         setAuthToken(data.token);
         setCurrentUser(data.user);
         fetchNotifications();
-        logActivity(`${data.user.name} created an account`, data.user.email);
+        logActivity(`${data.user.name} created an account`, data.user.email, "account");
         return { user: data.user };
       } catch (err) {
         return { error: apiError(err) };
@@ -259,7 +267,7 @@ export function StoreProvider({ children }) {
         setAuthToken(data.token);
         setCurrentUser(data.user);
         fetchNotifications();
-        logActivity(`${data.user.name} signed in`, data.user.email);
+        logActivity(`${data.user.name} signed in`, data.user.email, "account");
         return { user: data.user };
       } catch (err) {
         return { error: apiError(err) };
@@ -279,10 +287,11 @@ export function StoreProvider({ children }) {
   }, [signIn, signUp]);
 
   const signOut = useCallback(async () => {
+    if (currentUser?.email) logActivity("Signed out", currentUser.email);
     setAuthToken(null);
     setCurrentUser(null);
     setNotifications([]);
-  }, []);
+  }, [currentUser, logActivity]);
 
   /**
    * Create or update an animal record.
@@ -428,12 +437,36 @@ export function useStore() {
   return ctx;
 }
 
-/** Pick the fields the assistant endpoint accepts as animal context. */
+/**
+ * Pick the fields the assistant endpoint accepts as pet context. The full
+ * profile schema (medical history, vaccinations, allergies, medications,
+ * behavioral notes, ...) travels with every chat message so Meta AI answers
+ * stay personalized; the server re-validates every field.
+ */
 export function toAssistantAnimal(pet) {
   if (!pet) return null;
   const out = {};
-  for (const key of ["name", "species", "breed", "age", "gender", "color", "weight", "location", "marks", "status"]) {
+  for (const key of [
+    "name", "species", "breed", "age", "gender", "color", "weight",
+    "location", "lostLocation", "marks", "status", "tagNumber", "diet",
+    "vet", "activityLevel", "livingEnvironment",
+  ]) {
     if (typeof pet[key] === "string" && pet[key].trim()) out[key] = pet[key].trim();
+  }
+  for (const key of ["ageYears", "weightKg"]) {
+    if (pet[key] !== undefined && pet[key] !== null && pet[key] !== "" && Number.isFinite(Number(pet[key]))) {
+      out[key] = Number(pet[key]);
+    }
+  }
+  for (const key of ["spayedNeutered", "microchipped"]) {
+    if (typeof pet[key] === "boolean") out[key] = pet[key];
+  }
+  for (const key of ["medicalHistory", "behavioralNotes", "vaccinations", "allergies", "medications"]) {
+    const value = pet[key];
+    if (typeof value === "string" && value.trim()) out[key] = [value.trim()];
+    else if (Array.isArray(value) && value.filter((v) => typeof v === "string" && v.trim()).length) {
+      out[key] = value.filter((v) => typeof v === "string" && v.trim()).map((v) => v.trim());
+    }
   }
   return Object.keys(out).length ? out : null;
 }

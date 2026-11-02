@@ -23,6 +23,29 @@ export function bcp47For(code) {
   return "en-US";
 }
 
+/**
+ * Detect a chat language from the reply's script (Sinhala/Tamil/Arabic/
+ * Devanagari ranges). Returns a VOICE_LANGUAGES code, or null when the text
+ * is Latin-script (language undetectable from glyphs alone).
+ */
+const SCRIPT_RANGES = [
+  ["si", 0x0d80, 0x0dff], // Sinhala
+  ["ta", 0x0b80, 0x0bff], // Tamil
+  ["ar", 0x0600, 0x06ff], // Arabic
+  ["hi", 0x0900, 0x097f], // Devanagari (Hindi)
+];
+
+export function detectLangCode(text) {
+  const t = String(text ?? "");
+  for (const [code, lo, hi] of SCRIPT_RANGES) {
+    for (const ch of t) {
+      const cp = ch.codePointAt(0);
+      if (cp >= lo && cp <= hi) return code;
+    }
+  }
+  return null;
+}
+
 export function recognitionSupported() {
   return typeof window !== "undefined" && Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
 }

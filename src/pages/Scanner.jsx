@@ -134,7 +134,7 @@ export default function Scanner() {
           setResults(ranked);
           setMeta(scanMeta);
           setPhase(4);
-          logActivity(`Photo scan run (${ranked[0] ? `top match ${petDisplayId(ranked[0].pet)} at ${formatScore(ranked[0].score)}%` : "no high-confidence matches"})`, null);
+          logActivity(`Photo scan run (${ranked[0] ? `top match ${petDisplayId(ranked[0].pet)} at ${formatScore(ranked[0].score)}%` : "no high-confidence matches"})`, null, "scan");
         }, remaining),
       );
     } catch (err) {
