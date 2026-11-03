@@ -7,10 +7,14 @@ import Alerts from "./pages/Alerts";
 import Auth from "./pages/Auth";
 import Browse from "./pages/Browse";
 import Dashboard from "./pages/Dashboard";
+import ForgotPassword from "./pages/ForgotPassword";
 import Home from "./pages/Home";
+import Messages from "./pages/Messages";
 import PetProfile from "./pages/PetProfile";
 import RegisterPet from "./pages/RegisterPet";
+import ResetPassword from "./pages/ResetPassword";
 import Scanner from "./pages/Scanner";
+import WhyAnimalID from "./pages/WhyAnimalID";
 
 function Routes() {
   const { route } = useStore();
@@ -23,12 +27,20 @@ function Routes() {
       return <Alerts />;
     case "auth":
       return <Auth key={route.query.mode || "up"} />;
+    case "forgot-password":
+      return <ForgotPassword />;
+    case "reset-password":
+      return <ResetPassword key={route.param || "none"} />;
     case "register":
       return <RegisterPet />;
     case "pet":
       return <PetProfile />;
     case "dashboard":
       return <Dashboard />;
+    case "messages":
+      return <Messages />;
+    case "why":
+      return <WhyAnimalID />;
     default:
       return <Home />;
   }

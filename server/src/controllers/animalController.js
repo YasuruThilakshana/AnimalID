@@ -4,6 +4,7 @@ const path = require("path");
 const { Op } = require("sequelize");
 const Animal = require("../models/Animal");
 const Notification = require("../models/Notification");
+const User = require("../models/User");
 const { extractAnimalFeatures, getEmbeddingEngine, EMBEDDING_VERSION } = require("../services/samService");
 const {
   cosineSimilarity,
@@ -65,6 +66,48 @@ function pickFields(source, allowed) {
     if (source[key] !== undefined) out[key] = source[key];
   }
   return out;
+}
+
+// Mirrors the Animal column widths so oversized input fails fast with 400
+// instead of exploding at the database layer with a 500.
+const ANIMAL_FIELD_LIMITS = {
+  name: 120,
+  species: 60,
+  breed: 120,
+  age: 40,
+  gender: 20,
+  color: 120,
+  weight: 40,
+  location: 160,
+  lostLocation: 160,
+  ownerName: 120,
+  ownerEmail: 160,
+  contact: 120,
+  vet: 160,
+  marks: 20000,
+};
+
+const ANIMAL_STATUSES = ["safe", "lost", "found"];
+
+/**
+ * Strict schema check for pet registration/profile payloads. Returns an
+ * error string for the first violation, or null when valid.
+ */
+function validateAnimalFields(data) {
+  for (const [field, max] of Object.entries(ANIMAL_FIELD_LIMITS)) {
+    const value = data[field];
+    if (typeof value === "string" && value.length > max) {
+      return `Please keep ${field} under ${max} characters.`;
+    }
+  }
+  if (data.status !== undefined && !ANIMAL_STATUSES.includes(data.status)) {
+    return "Status must be safe, lost, or found.";
+  }
+  const email = data.ownerEmail;
+  if (typeof email === "string" && email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return "Please enter a valid owner email address.";
+  }
+  return null;
 }
 
 /** All uploaded angle files (front first) for multi-angle fusion. */
@@ -291,6 +334,8 @@ async function createAnimal(req, res, next) {
     if (!data.name || String(data.name).trim().length < 2) {
       return res.status(400).json({ error: "Name (2+ characters) is required." });
     }
+    const fieldError = validateAnimalFields(data);
+    if (fieldError) return res.status(400).json({ error: fieldError });
     if (data.ownerEmail) data.ownerEmail = String(data.ownerEmail).toLowerCase();
     data.name = String(data.name).trim();
 
@@ -319,6 +364,8 @@ async function updateAnimal(req, res, next) {
     if (!animal) return res.status(404).json({ error: "Animal not found." });
 
     const data = pickFields(req.body, EDITABLE_FIELDS);
+    const fieldError = validateAnimalFields(data);
+    if (fieldError) return res.status(400).json({ error: fieldError });
     if (data.ownerEmail) data.ownerEmail = String(data.ownerEmail).toLowerCase();
     if (data.name) data.name = String(data.name).trim();
     if (typeof data.lostLocation === "string") data.lostLocation = data.lostLocation.trim();
@@ -395,15 +442,52 @@ function deletePhotoFiles(animal) {
   return removed;
 }
 
+/**
+ * Resolve the caller's display identity for reporter/scanner attribution.
+ * The JWT carries id + email; the name comes from the user record (best
+ * effort — falls back to the email prefix so attribution never fails).
+ */
+async function callerIdentity(req) {
+  const userId = req.user?.id ?? null;
+  const email = String(req.user?.email || "").toLowerCase();
+  let name = "";
+  if (userId) {
+    try {
+      const user = await User.findByPk(userId);
+      if (user?.name) name = String(user.name).trim();
+    } catch {
+      /* attribution falls back to the email prefix below */
+    }
+  }
+  if (!name && email) name = email.split("@")[0];
+  return { userId, name, email };
+}
+
 async function reportSighting(req, res, next) {
   try {
     const animal = await Animal.findByPk(req.params.id);
     if (!animal) return res.status(404).json({ error: "Animal not found." });
+    // Strict lost-only gate: sightings are meaningless (and noisy) for pets
+    // that are home safe or listed as found strays.
+    if (animal.status !== "lost") {
+      return res.status(403).json({ error: "Sightings can only be reported for pets marked as lost." });
+    }
     const { place, note } = req.body;
     if (!place || String(place).trim().length < 3) {
       return res.status(400).json({ error: "A sighting place is required." });
     }
-    const sighting = { t: Date.now(), place: String(place).trim(), note: String(note || "").trim() };
+    if (String(place).length > 200 || String(note || "").length > 2000) {
+      return res.status(400).json({ error: "Please keep the sighting short and to the point." });
+    }
+    const reporter = await callerIdentity(req);
+    const sighting = {
+      t: Date.now(),
+      place: String(place).trim(),
+      note: String(note || "").trim(),
+      reporterUserId: reporter.userId,
+      reporterName: reporter.name,
+      reporterContact: reporter.email,
+    };
     await animal.update({
       sightings: [...(animal.sightings || []), sighting],
       timeline: [
@@ -634,7 +718,19 @@ async function scanPhoto(req, res, next) {
     if (best) {
       try {
         const scanLocation = String(req.body.location || "").trim() || null;
-        ownerNotified = (await maybeNotifyFoundScan({ match: best, scanLocation })).notified;
+        // Signed-in scanners are identified on the notification so the owner
+        // can message them directly; guests stay anonymous (best effort —
+        // attribution must never fail the scan).
+        let scanner = null;
+        if (req.user?.id) {
+          try {
+            const identity = await callerIdentity(req);
+            scanner = { userId: identity.userId, name: identity.name, contact: identity.email };
+          } catch {
+            /* anonymous scan */
+          }
+        }
+        ownerNotified = (await maybeNotifyFoundScan({ match: best, scanLocation, scanner })).notified;
       } catch (err) {
         console.warn("[scan] owner notification failed:", err.message);
       }
@@ -790,10 +886,12 @@ const FOUND_SCAN_MIN_CONFIDENCE = 99.99;
  * Pure decision plus one guarded write: skips anything unverified, below the
  * bar, not currently missing, ownerless, or already carrying an unread alert
  * (one unread notification per missing pet — repeat scans don't spam; a new
- * scan after the owner read the last one notifies again). Returns
- * { notified, notification?/reason? }.
+ * scan after the owner read the last one notifies again). An optional
+ * `scanner` ({ userId, name, contact }) identifies a signed-in finder on
+ * the notification so the owner can message them; guest scans stay
+ * anonymous. Returns { notified, notification?/reason? }.
  */
-async function maybeNotifyFoundScan({ match, scanLocation }) {
+async function maybeNotifyFoundScan({ match, scanLocation, scanner = null }) {
   if (!match || match.verified !== true) return { notified: false, reason: "unverified" };
   if (Number(match.confidence) < FOUND_SCAN_MIN_CONFIDENCE) return { notified: false, reason: "below-threshold" };
   const animal = match.animal || {};
@@ -815,6 +913,9 @@ async function maybeNotifyFoundScan({ match, scanLocation }) {
     title: `${petName} was scanned by a finder`,
     message,
     location: scanLocation || "",
+    scannerUserId: scanner?.userId ?? null,
+    scannerName: scanner?.name || "",
+    scannerContact: scanner?.contact || "",
   });
   console.log(`[scan] owner notified: ${petName} (pet #${petId}) matched 100% while missing.`);
   return { notified: true, notification };
@@ -964,4 +1065,5 @@ module.exports = {
   scoreCandidates,
   bestMicroScore,
   cascadeScoreCandidate,
+  validateAnimalFields,
 };

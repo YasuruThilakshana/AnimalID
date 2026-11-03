@@ -12,6 +12,16 @@ const sequelize = new Sequelize(DB_NAME, DB_USER, DB_PASSWORD, {
     underscored: true,
     timestamps: true,
   },
+  // Pooled connections for concurrent traffic: short-lived API queries share
+  // a bounded set of sockets instead of stalling on connect churn. Sized for
+  // a single app instance against MySQL's default 151 max_connections.
+  pool: {
+    max: 20,
+    min: 2,
+    acquire: 30000,
+    idle: 10000,
+    evict: 10000,
+  },
 });
 
 /**

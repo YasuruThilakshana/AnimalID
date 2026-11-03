@@ -1,6 +1,7 @@
 import { useState } from "react";
+import { isPhoneLike } from "../lib/contact.js";
 import { useStore } from "../lib/store";
-import { Logo } from "./ui";
+import { Logo, MaskedContact } from "./ui";
 
 const LINKS = [
   { name: "browse", label: "Find a pet", match: ["browse", "pet"] },
@@ -8,6 +9,8 @@ const LINKS = [
   { name: "alerts", label: "Alerts", match: ["alerts"] },
   { name: "register", label: "Register", match: ["register"] },
   { name: "dashboard", label: "Dashboard", match: ["dashboard"] },
+  { name: "messages", label: "Messages", match: ["messages"] },
+  { name: "why", label: "Why AnimalID", match: ["why"] },
 ];
 
 function formatNotifDate(value) {
@@ -29,6 +32,7 @@ export default function Navbar() {
     notificationsUnread,
     fetchNotifications,
     markNotificationsRead,
+    messagesUnread,
   } = useStore();
   const [open, setOpen] = useState(false);
   const [bellOpen, setBellOpen] = useState(false);
@@ -71,6 +75,11 @@ export default function Navbar() {
               {l.name === "alerts" && currentUser && unreadAlerts > 0 && (
                 <span className="ml-1.5 rounded-full bg-ember-500 px-1.5 py-0.5 text-[10px] font-black text-white">
                   {unreadAlerts > 9 ? "9+" : unreadAlerts}
+                </span>
+              )}
+              {l.name === "messages" && currentUser && messagesUnread > 0 && (
+                <span className="ml-1.5 rounded-full bg-ember-500 px-1.5 py-0.5 text-[10px] font-black text-white">
+                  {messagesUnread > 9 ? "9+" : messagesUnread}
                 </span>
               )}
             </button>
@@ -119,16 +128,52 @@ export default function Navbar() {
                         <li key={n.id} className={`border-b border-stone-100 px-4 py-3 last:border-0 ${n.read ? "" : "bg-amber-50/70"}`}>
                           <p className="text-xs font-bold text-pine-950">{n.title}</p>
                           <p className="mt-0.5 text-xs leading-relaxed text-stone-600">{n.message}</p>
-                          <div className="mt-1.5 flex items-center justify-between">
+                          {n.scannerUserId && (
+                            <p className="mt-1 text-[11px] font-semibold text-stone-500">
+                              Scanned by <span className="font-bold text-pine-800">{n.scannerName || "a member"}</span>
+                              {n.location ? ` near ${n.location}` : ""}
+                            </p>
+                          )}
+                          {n.scannerContact ? (
+                            <p className="mt-0.5 text-[11px]">
+                              {isPhoneLike(n.scannerContact) ? (
+                                <MaskedContact value={n.scannerContact} className="text-stone-500" />
+                              ) : (
+                                <a
+                                  href={`mailto:${n.scannerContact}`}
+                                  className="font-bold text-pine-700 hover:underline"
+                                >
+                                  {n.scannerContact}
+                                </a>
+                              )}
+                            </p>
+                          ) : null}
+                          <div className="mt-1.5 flex items-center justify-between gap-2">
                             <span className="text-[10px] font-semibold text-stone-400">{formatNotifDate(n.createdAt)}</span>
-                            {n.petId && (
-                              <button
-                                onClick={() => go("pet", n.petId)}
-                                className="cursor-pointer text-[11px] font-bold text-pine-700 hover:underline"
-                              >
-                                View pet →
-                              </button>
-                            )}
+                            <span className="flex items-center gap-3">
+                              {n.scannerUserId && (
+                                <button
+                                  onClick={() =>
+                                    go("messages", null, {
+                                      user: n.scannerUserId,
+                                      name: n.scannerName || "",
+                                      pet: n.petId || "",
+                                    })
+                                  }
+                                  className="cursor-pointer rounded-md bg-pine-900 px-2 py-1 text-[11px] font-bold text-white hover:bg-pine-800"
+                                >
+                                  Message Finder
+                                </button>
+                              )}
+                              {n.petId && (
+                                <button
+                                  onClick={() => go("pet", n.petId)}
+                                  className="cursor-pointer text-[11px] font-bold text-pine-700 hover:underline"
+                                >
+                                  View pet →
+                                </button>
+                              )}
+                            </span>
                           </div>
                         </li>
                       ))}
@@ -210,6 +255,11 @@ export default function Navbar() {
               {l.name === "alerts" && currentUser && unreadAlerts > 0 && (
                 <span className="ml-1.5 rounded-full bg-ember-500 px-1.5 py-0.5 text-[10px] font-black text-white">
                   {unreadAlerts > 9 ? "9+" : unreadAlerts}
+                </span>
+              )}
+              {l.name === "messages" && currentUser && messagesUnread > 0 && (
+                <span className="ml-1.5 rounded-full bg-ember-500 px-1.5 py-0.5 text-[10px] font-black text-white">
+                  {messagesUnread > 9 ? "9+" : messagesUnread}
                 </span>
               )}
             </button>

@@ -46,7 +46,7 @@ function parseEnvKey(text) {
  * Resolve the Meta API key on every request: an explicit env var wins, else
  * server/.env is re-read so a key added after boot takes effect without a
  * restart (cached into process.env once found). `envPath` is injectable for
- * tests. ASSISTANT_NO_ENV_FILE=1 disables the file fallback (test-only).
+ * tests. ASSISTANT_NO_ENV_FILE=1 disables the .env file lookup (test-only).
  */
 function resolveApiKey(envPath = path.join(__dirname, "..", "..", ".env")) {
   const fromEnv = (process.env.SAM_API_KEY || "").trim();
@@ -59,13 +59,99 @@ function resolveApiKey(envPath = path.join(__dirname, "..", "..", ".env")) {
       return fromFile;
     }
   } catch {
-    /* missing/unreadable .env — stay in offline mode */
+    /* missing/unreadable .env — no key available */
   }
   return "";
 }
 
 /** Previous generation, used for one automatic retry when 1.3 reports model_not_found. */
-const FALLBACK_CHAT_MODEL = "muse-spark-1.2";
+const PREVIOUS_CHAT_MODEL = "muse-spark-1.2";
+
+/** Total Meta API attempts per chat request (first try + transient retries). */
+const MAX_CHAT_ATTEMPTS = 3;
+
+/** Base backoff between transient retries (doubles per attempt). */
+const RETRY_BASE_DELAY_MS = 500;
+
+/**
+ * Exponential backoff before attempt N+1 (500ms, 1s, 2s, ...);
+ * ASSISTANT_RETRY_DELAY_MS=0 keeps tests fast.
+ */
+function retryDelayMs(attempt) {
+  const override = Number(process.env.ASSISTANT_RETRY_DELAY_MS);
+  const base = Number.isFinite(override) && override >= 0 ? override : RETRY_BASE_DELAY_MS;
+  return base * 2 ** Math.max(0, attempt - 1);
+}
+
+/**
+ * Total wall-clock budget shared by every Meta attempt in one chat request.
+ * Fits inside the 120s proxy/socket window with headroom left for the JSON
+ * reply, so a slow model degrades to a friendly error instead of a reset.
+ */
+const META_BUDGET_MS = 110000;
+
+/** Retries only start when at least this much budget remains. */
+const RETRY_MIN_BUDGET_MS = 5000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Transport failures worth retrying (proxy resets, timeouts, rebooting DNS). */
+const RETRYABLE_CODES = new Set([
+  "ECONNRESET",
+  "ECONNABORTED",
+  "ETIMEDOUT",
+  "EPIPE",
+  "EAI_AGAIN",
+  "EMPTY_RESPONSE",
+]);
+
+/**
+ * True when a failed Meta API call may succeed on retry: rate limits, 5xx,
+ * timeouts, and proxy/socket resets. Auth, validation, and unknown-host
+ * errors are final and must fail fast with a clean error message.
+ */
+function isRetryableError(err) {
+  const status = err?.response?.status;
+  if (status === 429) return true;
+  if (Number.isFinite(status)) return status >= 500;
+  const code = String(err?.code || "");
+  if (RETRYABLE_CODES.has(code)) return true;
+  return /timeout|socket hang up|temporarily/i.test(String(err?.message || ""));
+}
+
+/**
+ * True when the failure smells like an unresponsive model rather than a sad
+ * proxy: socket/axios timeouts and 504 gateway timeouts. Repeated strikes
+ * fail over to the previous model generation instead of hammering a stuck one.
+ */
+function isTimeoutError(err) {
+  if (err?.response?.status === 504) return true;
+  const code = String(err?.code || "");
+  if (code === "ECONNABORTED" || code === "ETIMEDOUT") return true;
+  return /timeout/i.test(String(err?.message || ""));
+}
+
+/**
+ * One-line friendly error notice per language, used when Meta AI cannot be
+ * reached (after retries) or no API key is configured. Short on purpose:
+ * every real answer comes from the model — never from canned text.
+ */
+const ASSISTANT_ERROR_MESSAGE = {
+  en: "Ash couldn't reach the live assistant just now — please try again in a moment.",
+  si: "Ash ට සජීවී සහායකයා වෙත දැන් ළඟා විය නොහැක — මොහොතකින් නැවත උත්සාහ කරන්න.",
+  ta: "Ash-ஆல் நேரடி உதவியாளரை இப்போது அணுக முடியவில்லை — சிறிது நேரத்தில் மீண்டும் முயற்சிக்கவும்.",
+  es: "Ash no pudo comunicarse con el asistente en vivo — inténtalo de nuevo en un momento.",
+  fr: "Ash n'a pas pu joindre l'assistant en direct — réessaie dans un instant.",
+  ar: "تعذّر على Ash الوصول إلى المساعد المباشر الآن — حاول مرة أخرى بعد قليل.",
+  hi: "Ash अभी लाइव सहायक से संपर्क नहीं कर सका — कृपया थोड़ी देर में पुनः प्रयास करें।",
+};
+
+/** Friendly error notice in the user's language (auto/unknown → English). */
+function assistantErrorMessage(language) {
+  return ASSISTANT_ERROR_MESSAGE[sanitizeLanguage(language)] || ASSISTANT_ERROR_MESSAGE.en;
+}
 
 /** True when the API rejected the requested model (unknown/retired name). */
 function isModelNotFound(err) {
@@ -149,7 +235,7 @@ function logChatFailure({ err, apiUrl, models, hasImage, timeoutMs }) {
       `${transport ? ` transport=${transport}` : ""}` +
       `${headers ? ` headers=${headers}` : ""}` +
       `): ${message.slice(0, 500)}${hint}.` +
-      `${body ? ` body=${body}` : ""} Returning fallback.`,
+      `${body ? ` body=${body}` : ""} Returning error.`,
   );
 }
 
@@ -430,7 +516,7 @@ function renderCareLogs(careLogs) {
   return `Recent care-log entries for this pet (use them for health timelines and vet reports):\n${lines.join("\n")}`;
 }
 
-/** What Ash knows about the AnimalID app itself (used by live + offline replies). */
+/** What Ash knows about the AnimalID app itself (sent to the model). */
 const APP_GUIDE = [
   "AnimalID app guide — help users with these flows (end-user steps only):",
   "- Register: free account, then add a pet in ~10 minutes (basics, ID details, 4 photo angles). Each pet gets a permanent AnimalID and printable scan code.",
@@ -549,7 +635,7 @@ function systemPrompt(animal, language = "auto", options = {}) {
   return prompt;
 }
 
-/** Classify the user's message so offline replies and suggestions stay relevant. */
+/** Classify the user's message so suggestions and context switching stay relevant. */
 function detectTopic(message) {
   const t = String(message || "").toLowerCase();
   if (/(didn't eat|didnt eat|doesn't eat|doesnt eat|won't eat|wont eat|isn't eating|isnt eating|not eating|haven't eaten|hasn't eaten|refus\w* (food|to eat)|no appetite|lost \w* appetite|skipping meals|stopped eating)/.test(t)) return "appetite";
@@ -628,282 +714,6 @@ function suggestReplies(message, animal, module) {
     : ["I lost my pet", "I found a pet", "How do I register?"];
 }
 
-/**
- * Species-aware fallback reply used when no API key is configured or the
- * Meta AI call fails, so the chat window always shows something helpful.
- */
-function fallbackReply(animal, reason) {
-  const who = animal?.name ? `**${animal.name}**` : "your pet";
-  const species = (animal?.species || "").toLowerCase();
-  const kind = species && species !== "unknown" ? ` ${species}` : " pet";
-  const lines = [
-    `Here's some quick${kind} guidance for ${who} while I'm running in offline mode:`,
-    ``,
-    `### Diet tips`,
-    `- Feed a complete, age-appropriate diet and keep fresh water available at all times.`,
-    `- Avoid sudden food changes — transition over 7–10 days.`,
-    `### Behavioral habits`,
-    `- Keep a steady daily routine for feeding, exercise, and rest.`,
-    `- Reward calm behavior; sudden changes can signal stress or illness.`,
-    `### Age-related care`,
-    `- Young animals need vaccines and socialization; seniors need joint-friendly exercise and regular vet checks.`,
-    ``,
-    reason === "error"
-      ? `I'm having trouble reaching the live assistant right now — please try again in a moment, or call the lost-pet hotline at **1-800-555-0199** for urgent cases.`
-      : `Ask me anything — for example "What should I feed them?" or "How do I report a sighting?".`,
-  ];
-  return lines.join("\n");
-}
-
-/** Offline-mode language note, translated per preferred language. */
-const OFFLINE_LANG_NOTES = {
-  si: "_ඔබ වෙනත් භාෂාවකින් ලියා ඇත — සජීවී සහායකයා ඔබේ භාෂාවෙන් ස්වයංක්‍රීයව පිළිතුරු දෙයි; අක්‍රීය ආකාරයේදී ඉංග්‍රීසියෙන් පිළිතුරු ලැබේ._",
-  ta: "_நீங்கள் வேறு மொழியில் எழுதியுள்ளீர்கள் — நேரடி உதவியாளர் உங்கள் மொழியில் தானாகவே பதிலளிக்கும்; ஆஃப்லைன் பயன்முறையில் ஆங்கிலத்தில் பதிலளிக்கப்படும்._",
-  es: "_Escribiste en otro idioma — el asistente en vivo responde en tu idioma automáticamente; el modo sin conexión responde en inglés._",
-  fr: "_Vous avez écrit dans une autre langue — l'assistant en direct répond automatiquement dans votre langue ; le mode hors ligne répond en anglais._",
-  ar: "_لقد كتبت بلغة أخرى — المساعد المباشر يردّ بلغتك تلقائيًا؛ أما الوضع دون اتصال فيردّ بالإنجليزية._",
-  hi: "_आपने किसी अन्य भाषा में लिखा है — लाइव सहायक आपकी भाषा में स्वतः उत्तर देता है; ऑफ़लाइन मोड में उत्तर अंग्रेज़ी में मिलता है._",
-};
-
-function offlineLanguageNote(message, language) {
-  const lang = sanitizeLanguage(language);
-  if (lang !== "auto" && lang !== "en" && OFFLINE_LANG_NOTES[lang]) {
-    return `\n\n${OFFLINE_LANG_NOTES[lang]}`;
-  }
-  return looksNonEnglish(message)
-    ? `\n\n_You wrote in another language — the live assistant replies in your language automatically; offline mode answers in English._`
-    : "";
-}
-
-/**
- * Topic-aware offline reply: triage checklists and app guidance that work
- * with no API key. `message` selects the template; `animal` personalizes it.
- */
-/** Shared tail when the live Meta AI call failed (offline mode stays silent). */
-function errorTail(reason) {
-  return reason === "error"
-    ? `\n\nI'm having trouble reaching the live assistant right now — please try again in a moment, or call the lost-pet hotline at **1-800-555-0199** for urgent cases.`
-    : "";
-}
-
-function offlineReply(message, animal, reason = "offline", hasImage = false, language = "auto", options = {}) {
-  const langNote = offlineLanguageNote(message, language);
-  if (hasImage) return photoReply(message, animal, reason) + langNote;
-  const topic = detectTopic(message);
-  const careLogs = Array.isArray(options?.careLogs) ? options.careLogs : [];
-  // An explicit module selection routes to its builder; otherwise the
-  // vet-report/planner keyword intents win (they have no topic equivalent).
-  // Every other topic keeps its existing reply. The backend-probing
-  // guardrail always wins over module routing.
-  if (topic !== "backend") {
-    const explicit = sanitizeModule(options?.module);
-    if (explicit && MODULE_OFFLINE[explicit]) {
-      return MODULE_OFFLINE[explicit](animal, topic, reason, careLogs) + errorTail(reason) + langNote;
-    }
-    const intent = detectIntentModule(message);
-    if (intent && MODULE_OFFLINE[intent]) {
-      return MODULE_OFFLINE[intent](animal, topic, reason, careLogs) + errorTail(reason) + langNote;
-    }
-  }
-  if (topic === "general" || topic === "symptom") return symptomAwareReply(topic, animal, reason) + langNote;
-  const builder = OFFLINE_TOPICS[topic];
-  if (!builder) return fallbackReply(animal, reason) + langNote;
-  return builder(animal) + errorTail(reason) + langNote;
-}
-
-/** Species-aware toxic-food shortlist for offline nutrition answers. */
-function toxicFoodsFor(species) {
-  const s = String(species || "").toLowerCase();
-  if (s.includes("cat")) return "onion, garlic, grapes, chocolate, xylitol, and **lilies (deadly to cats)**";
-  if (s.includes("bird") || s.includes("parrot")) return "avocado, chocolate, caffeine, alcohol, onion, garlic, salt, and fruit pits — plus Teflon/smoke fumes";
-  if (s.includes("reptile") || s.includes("lizard") || s.includes("snake") || s.includes("turtle")) return "fireflies, avocado, and wild-caught insects from sprayed areas";
-  if (s.includes("fish")) return "human food and overfeeding — use species-appropriate flakes/pellets only";
-  if (s.includes("rabbit") || s.includes("hamster") || s.includes("exotic") || s.includes("ferret")) return "chocolate, onion, garlic, and anything high in sugar or salt";
-  if (s.includes("farm") || s.includes("chicken") || s.includes("goat") || s.includes("horse") || s.includes("sheep")) return "nightshade, rhododendron, oleander, moldy feed, and chocolate";
-  return "chocolate, grapes/raisins, onion, garlic, xylitol (birch sugar), macadamia nuts, alcohol, and cooked bones";
-}
-
-/** Offline nutrition builder: portions from weight + strict toxic warnings. */
-function nutritionOffline(animal) {
-  const who = petName(animal);
-  const species = (animal?.species || "pet").toLowerCase();
-  const weight = animal?.weightKg || animal?.weight;
-  const weightLine = weight
-    ? `At **${animal.weightKg ? `${animal.weightKg} kg` : animal.weight}**, scale portions to weight and body condition — most labels give a per-kg table.`
-    : "Weigh them (or check the last vet record) — portions scale with weight, so that number drives the whole plan.";
-  return [
-    `### Nutrition plan for ${who}`,
-    ``,
-    `**Daily portions from weight:**`,
-    `- Dogs: resting needs ≈ 70 × weight_kg^0.75 kcal/day, ×1.6 for a neutered adult (×2 active/intact, ×3 puppy).`,
-    `- Cats: roughly 20–25 kcal per 100 g body weight (≈200–250 kcal/day for a 4–5 kg adult).`,
-    `- Other species: follow the food label's per-weight table and reassess monthly.`,
-    `- ${weightLine}`,
-    ``,
-    `**Strict toxic-food list for ${species}s:** ${toxicFoodsFor(species)}.`,
-    ``,
-    `**Build the habit:** 2 measured meals a day (3–4 for young ones), treats under 10% of calories, fresh water always, transitions over 7–10 days.`,
-    ``,
-    `Tell me ${who}'s weight and current food and I'll fine-tune the portions.`,
-  ].join("\n");
-}
-
-/** Offline health builder: delegate to the matching triage checklist. */
-function healthOffline(animal, topic) {
-  if (topic === "appetite" || topic === "vomiting" || topic === "disease") {
-    return OFFLINE_TOPICS[topic](animal);
-  }
-  // Symptom checklist without the error tail (the caller appends it once).
-  return symptomAwareReply("symptom", animal, "offline");
-}
-
-/** Offline planner builder: a same-day schedule template. */
-function plannerOffline(animal) {
-  const who = petName(animal);
-  return [
-    `### Daily care schedule for ${who}`,
-    `A solid day you can start tomorrow — tell me your wake/work hours and I'll set exact times:`,
-    ``,
-    `**Morning**`,
-    `1. Fresh water + measured breakfast (remove uneaten food after 20–30 min).`,
-    `2. Toilet break / litter scoop + quick health glance (eyes, nose, energy).`,
-    `3. Exercise block: 20–30 min walk/play (dogs 30–60+ min total; cats a hunting-play session).`,
-    ``,
-    `**Midday**`,
-    `1. Short play or training session (5 minutes, end on a win).`,
-    `2. Fresh water top-up; birds/reptiles: light, heat, and humidity check.`,
-    ``,
-    `**Evening**`,
-    `1. Measured dinner + calm wind-down play.`,
-    `2. Grooming rotation: brush (daily for long coats, weekly otherwise), weekly ear/eye wipe, monthly nail trim.`,
-    `3. Same bedtime spot — routine is calming.`,
-    ``,
-    `**Weekly:** full groom, weigh-in, toy rotation, wash bowls/bedding; fish: partial water change + parameter check.`,
-  ].join("\n");
-}
-
-/** Offline vet-report builder: summarize care logs into a vet-visit sheet. */
-function vetReportOffline(animal, careLogs) {
-  const who = petName(animal, "your pet");
-  const species = animal?.species || "—";
-  const head = [
-    `### Vet visit summary for ${who}`,
-    ``,
-    `**Patient:** ${species}${animal?.breed ? ` · ${animal.breed}` : ""}${animal?.age ? ` · ${animal.age}` : ""}${animal?.weight ? ` · ${animal.weight}` : ""}${animal?.gender ? ` · ${animal.gender}` : ""}`,
-  ];
-  if (animal?.vaccinations?.length) head.push(`**Vaccinations on file:** ${animal.vaccinations.join("; ")}`);
-  if (animal?.medicalHistory?.length) head.push(`**Medical history:** ${animal.medicalHistory.join("; ")}`);
-  if (animal?.medications?.length) head.push(`**Current medications:** ${animal.medications.join("; ")}`);
-  if (animal?.allergies?.length) head.push(`**Allergies:** ${animal.allergies.join("; ")}`);
-  head.push(``);
-  if (Array.isArray(careLogs) && careLogs.length) {
-    head.push(`**Timeline of recent events:**`);
-    careLogs.slice(-10).forEach((entry, i) => {
-      const text = typeof entry === "string" ? entry : entry.text;
-      const when = entry?.date || (Number.isFinite(Number(entry?.t)) ? new Date(Number(entry.t)).toLocaleDateString() : "");
-      head.push(`${i + 1}. ${when ? `(${when}) ` : ""}${text}`);
-    });
-    head.push(``);
-    head.push(`**Current concerns:** describe the main symptom in 1–2 sentences and I'll add it to this sheet.`);
-  } else {
-    head.push(`**Timeline of recent events:** no care logs attached yet — start tracking today:`);
-    head.push(`☐ Appetite + water intake ☐ Energy/mood ☐ Stool + urination ☐ Vomiting/coughing/scratching ☐ Meds with times`);
-  }
-  head.push(``);
-  head.push(`**Questions to ask your vet:** what is the likely cause? what tests (if any) do you suggest? what should I monitor at home, and when should I come back?`);
-  return head.join("\n");
-}
-
-/** Offline budget builder: rough per-species ranges (never fixed prices). */
-function budgetOffline(animal) {
-  const who = petName(animal, "a pet");
-  const s = String(animal?.species || "").toLowerCase();
-  let rows;
-  if (s.includes("cat")) {
-    rows = [`Food: ~$20–$60/mo`, `Routine vet + vaccines: ~$100–$300/yr`, `Litter: ~$15–$30/mo`, `Supplies/toys: ~$10–$25/mo`];
-  } else if (s.includes("bird") || s.includes("parrot")) {
-    rows = [`Food: ~$15–$50/mo`, `Avian vet: ~$100–$300/yr`, `Toys/cage upkeep: ~$10–$30/mo`, `Setup (cage): ~$80–$400 once`];
-  } else if (s.includes("reptile") || s.includes("lizard") || s.includes("snake") || s.includes("turtle")) {
-    rows = [`Food: ~$10–$40/mo`, `Heat/lighting: ~$10–$25/mo`, `Exotic vet: ~$75–$250/yr`, `Setup (terrarium): ~$100–$500 once`];
-  } else if (s.includes("fish")) {
-    rows = [`Food: ~$5–$20/mo`, `Water care + power: ~$10–$30/mo`, `Livestock/equipment: varies widely`, `Setup (tank): ~$60–$400 once`];
-  } else if (s.includes("farm") || s.includes("chicken") || s.includes("goat") || s.includes("horse") || s.includes("sheep")) {
-    rows = [`Feed: ~$40–$200+/mo`, `Hoof/farrier: ~$30–$150/visit`, `Routine vet: ~$150–$500/yr`, `Shelter/fencing: varies widely`];
-  } else if (s.includes("rabbit") || s.includes("hamster") || s.includes("exotic") || s.includes("ferret") || s.includes("hedgehog")) {
-    rows = [`Food + hay: ~$10–$50/mo`, `Exotic vet: ~$75–$250/yr`, `Bedding/habitat: ~$10–$40/mo`, `Setup: ~$60–$300 once`];
-  } else {
-    rows = [`Food: ~$25–$80/mo`, `Routine vet + vaccines: ~$150–$400/yr`, `Grooming: ~$0–$80/mo`, `Supplies/toys: ~$15–$40/mo`];
-  }
-  return [
-    `### Budget guide for ${who}`,
-    `Typical global ranges, not fixed prices — breed, size, and region move every line:`,
-    ``,
-    ...rows.map((r) => `☐ **${r.split(":")[0]}:** ${r.split(":").slice(1).join(":").trim()}`),
-    ``,
-    `**Upfront:** adoption (~$50–$300, often vaccinated already) vs breeder (~$300–$3,000+).`,
-    `**Rule of thumb:** keep an emergency fund of 1–2 months of care costs; insurance pays off for dogs/cats.`,
-    ``,
-    `Tell me the species and breed you're considering and I'll break the costs down further.`,
-  ].join("\n");
-}
-
-/** Offline builders per care module (signature: animal, topic, reason, careLogs). */
-const MODULE_OFFLINE = {
-  nutrition: (animal) => nutritionOffline(animal),
-  health: (animal, topic) => healthOffline(animal, topic),
-  behavior: (animal) => OFFLINE_TOPICS.behavior(animal),
-  planner: (animal) => plannerOffline(animal),
-  "vet-report": (animal, _topic, _reason, careLogs) => vetReportOffline(animal, careLogs),
-  budget: (animal) => budgetOffline(animal),
-};
-
-/** Offline answer when a photo is attached but no vision model is reachable. */
-function photoReply(message, animal, reason) {
-  const who = petName(animal, "this animal");
-  const topic = detectTopic(message);
-  const tail =
-    reason === "error"
-      ? `\n\nI'm having trouble reaching the live assistant right now — please try again in a moment.`
-      : "";
-  const checklist =
-    topic === "symptom" || topic === "appetite" || topic === "vomiting" || topic === "disease"
-      ? [
-        `**Meanwhile, tell me what you see so I can still help:**`,
-        `☐ Species, likely breed, size, and colors/markings`,
-        `☐ Skin & coat: redness, flakes, bald patches, lumps, wounds?`,
-        `☐ Eyes, nose, ears: discharge, swelling, redness?`,
-        `☐ Body condition: ribs showing, bloated belly, limping?`,
-        `☐ Behavior right now: eating, drinking, energy level?`,
-      ]
-      : [
-        `**Meanwhile, tell me what you see so I can still help:**`,
-        `☐ Species, likely breed, size, and colors/markings`,
-        `☐ What you want to know (breed? health clue? age? behavior?)`,
-        `☐ Coat & skin, eyes, and body condition — anything unusual?`,
-      ];
-  return (
-    [
-      `### Photo received for ${who}`,
-      `I can't examine images in offline mode — with the live assistant connected I'll identify the animal and breed, and answer questions about its skin, physical state, and features.`,
-      ``,
-      ...checklist,
-      ``,
-      `Tip: the **Scanner** page can identify registered pets from a photo right now.`,
-    ].join("\n") + tail
-  );
-}
-
-/** True when the message is probably not English (non-Latin script or known greetings). */
-function looksNonEnglish(text) {
-  const t = String(text || "");
-  if (!t.trim()) return false;
-  let nonLatin = 0;
-  for (const ch of t) {
-    if (ch.codePointAt(0) > 127 && ++nonLatin >= 3) return true;
-  }
-  return /^(hola|bonjour|namaste|namaskar|ayubowan|kohomada|vanakkam|ni hao|konnichiwa|salaam|salam)\b/i.test(t.trim());
-}
-
 const MAX_IMAGE_CHARS = 6 * 1024 * 1024;
 
 /**
@@ -916,336 +726,6 @@ function sanitizeImage(raw) {
   return /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(raw) ? raw : "invalid";
 }
 
-function petName(animal, fallback = "your pet") {
-  return animal?.name ? `**${animal.name}**` : fallback;
-}
-
-const OFFLINE_TOPICS = {
-  appetite: (animal) => {
-    const who = petName(animal);
-    return [
-      `### Appetite check for ${who}`,
-      `Skipping 1–2 meals is often no emergency — but let's find the real cause. Tick through this checklist:`,
-      ``,
-      `☐ **Recent changes?** New food, moving, travel, a new pet, loud events — stress kills appetite.`,
-      `☐ **Mouth pain?** Drooling, pawing at the mouth, bad breath, dropping food.`,
-      `☐ **Tummy trouble?** Vomiting, diarrhea, bloating, or gas alongside the skipped meals.`,
-      `☐ **Energy level?** Still playful, or lethargic and hiding?`,
-      `☐ **Drinking water normally?** Not drinking is more urgent than not eating.`,
-      `☐ **Got into anything?** Trash, rich human food, plants, or chemicals.`,
-      ``,
-      `**Try this now:**`,
-      `1. Offer something tempting — warm the food slightly or add a spoon of plain wet food or broth (no onion or garlic).`,
-      `2. Keep it calm: a quiet feeding spot, then remove uneaten food after 20–30 minutes and retry at the next meal.`,
-      `3. Track water intake and energy over the next 12–24 hours.`,
-      ``,
-      `**See a vet promptly if:** a young puppy/kitten won't eat for 12+ hours, an adult refuses food for 24–48 hours, or not eating comes with vomiting, diarrhea, lethargy, bloating, or suspected poisoning.`,
-      ``,
-      `Tell me: how long has ${who} refused food, and is water intake normal? I'll narrow it down from there.`,
-    ].join("\n");
-  },
-  vomiting: (animal) => {
-    const who = petName(animal);
-    return [
-      `### Vomiting / diarrhea triage for ${who}`,
-      `One episode after eating too fast or something odd is common. Run this checklist to judge severity:`,
-      ``,
-      `☐ **How often?** Once, or repeated episodes over hours?`,
-      `☐ **What's in it?** Undigested food, bile/foam, blood, or foreign objects?`,
-      `☐ **Anything else?** Diarrhea, lethargy, belly pain, or bloating?`,
-      `☐ **Possible cause?** Trash, new food, human food, plants, medication, or chemicals?`,
-      `☐ **Still drinking?** Dehydration (dry gums, skin that stays tented) needs fast action.`,
-      ``,
-      `**Try this now:**`,
-      `1. Withhold food for 6–12 hours (adults only — never fast puppies, kittens, or diabetic pets).`,
-      `2. Offer small sips of water often; then reintroduce bland food gradually.`,
-      `3. Save a note of timing and appearance — your vet will ask.`,
-      ``,
-      `**See a vet urgently if:** blood is present, vomiting repeats, the belly is swollen or painful, ${who} can't keep water down, is very lethargic, or may have eaten something toxic.`,
-    ].join("\n");
-  },
-  diet: (animal) => {
-    const who = petName(animal);
-    const species = (animal?.species || "pet").toLowerCase();
-    return [
-      `### Diet tips for ${who}`,
-      ``,
-      `☐ **Right food for the life stage?** Puppy/kitten, adult, and senior formulas differ a lot.`,
-      `☐ **Measured portions?** Follow the pack guide for ${who}'s weight, split into 2 meals (3–4 for young ones).`,
-      `☐ **Fresh water always available?** Wash the bowl daily.`,
-      `☐ **Toxic foods out of reach?** Chocolate, grapes/raisins, onion, garlic, xylitol, macadamia nuts, alcohol.`,
-      ``,
-      `**Good habits:** transition foods over 7–10 days, keep treats under 10% of daily calories, and weigh ${who} monthly — slow weight creep is the most common ${species} diet problem.`,
-      ``,
-      `Tell me ${who}'s age and current food and I'll fine-tune the plan.`,
-    ].join("\n");
-  },
-  behavior: (animal) => {
-    const who = petName(animal);
-    return [
-      `### Behavior help for ${who}`,
-      `Most behavior issues are communication, not disobedience. Work through this:`,
-      ``,
-      `☐ **Needs met?** Enough exercise, play, and mental stimulation for the age and breed?`,
-      `☐ **Trigger?** When exactly does it happen — visitors, being alone, walks, nights?`,
-      `☐ **Recent change?** New home, schedule, family member, or pet?`,
-      `☐ **Health first?** Sudden behavior changes (hiding, snapping, soiling) deserve a vet check.`,
-      ``,
-      `**Try this now:**`,
-      `1. Reward the behavior you want within seconds — treats and calm praise beat punishment every time.`,
-      `2. Manage the environment first (crate, baby gate, closed bins) while you train.`,
-      `3. Train in 5-minute sessions, twice a day; end on a win.`,
-      ``,
-      `Describe what ${who} does and when — I'll build a step-by-step training plan.`,
-    ].join("\n");
-  },
-  age: (animal) => {
-    const who = petName(animal);
-    return [
-      `### Age-related care for ${who}`,
-      ``,
-      `**Young pets need:**`,
-      `- Vaccination and deworming on schedule, plus early socialization.`,
-      `- Puppy/kitten food in 3–4 small meals a day.`,
-      `- Chew toys and short, frequent training sessions.`,
-      ``,
-      `**Senior pets need:**`,
-      `- Vet checks every 6 months; watch for stiffness, weight change, and extra thirst.`,
-      `- Joint-friendly exercise, a warm bed, and easy access to food, water, and litter.`,
-      `- Senior-formula food and a dental check.`,
-      ``,
-      `Tell me ${who}'s age and I'll tailor the checklist.`,
-    ].join("\n");
-  },
-  lost: (animal) => {
-    const who = petName(animal, "your pet");
-    return [
-      `### Lost-pet action plan for ${who}`,
-      `Move fast — the first hours matter most:`,
-      ``,
-      `1. Open ${who}'s profile and hit **Report as lost** so the alert broadcasts.`,
-      `2. Generate a lost-pet poster from the **Alerts hub** and put it up nearby.`,
-      `3. Check new **sightings** on the profile — finders report there.`,
-      `4. Search on foot with a familiar voice and strong-smelling food; leave a worn clothing item outside.`,
-      ``,
-      `For urgent help call the lost-pet hotline at **1-800-555-0199**.`,
-    ].join("\n");
-  },
-  found: () => [
-    `### Found-pet action plan`,
-    `Great instinct — here's what to do:`,
-    ``,
-    `1. Keep them safe and check for a collar tag.`,
-    `2. Scan their AnimalID or run a **photo scan** to find the owner instantly.`,
-    `3. If there's no match, report a **sighting** on the closest profile.`,
-    ``,
-    `No account is needed to scan — just drag in a photo.`,
-  ].join("\n"),
-  register: () => [
-    `### How registration works`,
-    `Registration takes about 10 minutes:`,
-    ``,
-    `1. Create a free account (or use the demo to explore).`,
-    `2. Fill in basics, ID details, and upload 4 photo angles.`,
-    `3. Get a permanent AnimalID plus a printable scan code.`,
-    ``,
-    `Your progress saves as a draft automatically.`,
-  ].join("\n"),
-  scan: () => [
-    `### How photo scan works`,
-    `The scanner compares an uploaded picture against every registered pet using coat, markings, species, and location signals, then ranks likely matches with confidence scores.`,
-    ``,
-    `No account needed to scan — just drag in a photo. For best results, add the species and any visible markings.`,
-  ].join("\n"),
-  price: (animal) => {
-    const who = petName(animal, "a pet");
-    return [
-      `### Cost guide for ${who}`,
-      `Prices vary a lot by breed, age, pedigree, and country — treat these as typical global ranges, not fixed prices:`,
-      ``,
-      `☐ **Upfront:** adoption ($50–$300) vs breeder ($300–$3,000+ for popular breeds); pedigree papers and rarity drive price up.`,
-      `☐ **Monthly food:** roughly $20–$80 depending on size and food quality.`,
-      `☐ **Vet care:** vaccines + checkups roughly $100–$400/year; emergencies cost far more — consider insurance.`,
-      `☐ **Extras:** grooming, litter, toys, bedding, training — roughly $20–$60/month.`,
-      ``,
-      `**Cheapest healthy start:** adopt from a shelter (often vaccinated + spayed/neutered already) and ask the vet for a first-year cost plan.`,
-      ``,
-      `Tell me the species and breed you're considering and I'll break the costs down further.`,
-    ].join("\n");
-  },
-  disease: (animal) => {
-    const who = petName(animal);
-    return [
-      `### Disease guide for ${who}`,
-      `Common serious diseases worth knowing about:`,
-      ``,
-      `- **Parvovirus (dogs):** severe vomiting/diarrhea, often bloody; deadly without fast treatment. Prevented by puppy vaccines.`,
-      `- **Distemper (dogs):** fever, coughing, seizures; prevented by core vaccines.`,
-      `- **Rabies:** fatal once symptoms show; vaccination is required in most regions.`,
-      `- **Feline leukemia / FIV (cats):** spread cat-to-cat; test new cats and vaccinate.`,
-      `- **Allergies & skin infections:** itching, redness, hot spots — often manageable once the trigger is found.`,
-      ``,
-      `**Prevention checklist:**`,
-      `☐ Core vaccines on schedule ☐ Parasite control (fleas, ticks, worms) ☐ Annual vet check ☐ Isolate + call a vet fast if several animals fall ill together.`,
-      ``,
-      `This is general guidance, not a medical diagnosis — only a vet can diagnose and prescribe. Which disease or symptom should I explain in detail?`,
-    ].join("\n");
-  },
-  play: (animal) => {
-    const who = petName(animal);
-    return [
-      `### Play & enrichment for ${who}`,
-      `Play keeps ${who} fit, calm, and bonded with you. Match play to age and energy:`,
-      ``,
-      `☐ **Daily exercise?** Most dogs need 30–60+ minutes of walks and play; cats need 2–3 short hunting-play sessions.`,
-      `☐ **Right toys?** Chew toys, puzzle feeders, balls, and (for cats) wand teasers and scratchers. Rotate them weekly.`,
-      `☐ **Mental work?** Sniff walks, trick training, and food puzzles tire them out faster than running alone.`,
-      `☐ **Boredom signs?** Chewing, night zoomies, or attention-seeking usually means: more play, not more scolding.`,
-      ``,
-      `**Try this week:** two 10-minute play sessions a day, one puzzle feeder, and one new walking route.`,
-      ``,
-      `Tell me ${who}'s species, age, and energy level and I'll suggest specific games.`,
-    ].join("\n");
-  },
-  habits: (animal) => {
-    const who = petName(animal);
-    return [
-      `### Daily habits & routine for ${who}`,
-      `Animals thrive on predictability. A solid daily rhythm looks like this:`,
-      ``,
-      `☐ **Same times daily** for meals, walks/play, and bedtime.`,
-      `☐ **Sleep:** adult dogs ~12–14h, cats ~13–16h, puppies/kittens up to 20h — mostly naps.`,
-      `☐ **Grooming:** brush weekly (daily for long coats), bathe only when dirty, trim nails monthly.`,
-      `☐ **Fresh water + clean bowls/litter** every day.`,
-      ``,
-      `Sudden routine breaks (hiding, restlessness, accidents) are often the first sign of stress or illness — mention them to your vet if they last.`,
-      ``,
-      `Tell me ${who}'s species and age and I'll sketch a sample day.`,
-    ].join("\n");
-  },
-  species: (animal) => {
-    const who = petName(animal, "that animal");
-    return [
-      `### Species & breed guide for ${who}`,
-      `Here's how to size up any species or breed before you commit:`,
-      ``,
-      `☐ **Origin & purpose?** What the breed was made for (herding, hunting, companionship) predicts its energy and instincts.`,
-      `☐ **Size & lifespan?** Bigger dogs live ~8–12 years, small dogs and indoor cats often 14–18+, parrots 20–60+ depending on species.`,
-      `☐ **Temperament?** Good with kids, strangers, other pets? Needs company or independence?`,
-      `☐ **Care load?** Exercise, grooming, training, and vet needs vary enormously by breed.`,
-      ``,
-      `Tell me the exact species or breed and I'll detail its origin, size, lifespan, temperament, and care needs.`,
-    ].join("\n");
-  },
-  alerts: () => [
-    `### Alert subscriptions`,
-    `Get notified the moment a pet goes missing near you:`,
-    ``,
-    `1. Open the **Alerts hub** (every lost report lives there).`,
-    `2. Scroll to **Get alerts for your area** at the bottom.`,
-    `3. Enter your email (and area) and hit **Alert me**.`,
-    ``,
-    `You can also filter the hub by keyword, area, species, and recency to browse current alerts.`,
-  ].join("\n"),
-  matches: () => [
-    `### How to view scan matches`,
-    `After a photo scan, ranked top matches appear below your photo:`,
-    ``,
-    `1. Each candidate shows a **similarity %** and a band: **High (85%+)**, **Moderate (65%+)**, **Possible (50%+)** — 50%+ counts as a confident match.`,
-    `2. Tap a pet's name or **Open profile** to see the full record.`,
-    `3. Below the cutoff? The closest profiles are still listed so you can compare manually.`,
-    ``,
-    `Only one species is ever compared at a time, so matches are always the same kind of animal.`,
-  ].join("\n"),
-  sighting: () => [
-    `### How to report a sighting`,
-    `Spotted a lost pet? The owner sees it on the profile timeline:`,
-    ``,
-    `1. Open the pet's profile (from a scan match, the Alerts hub, or Find-a-pet search).`,
-    `2. Add **where and when** you saw them, plus a note (direction, behavior, collar?).`,
-    `3. Submit — it lands on the profile's sightings and timeline instantly.`,
-    ``,
-    `A quick photo helps more than pursuit — don't chase a scared animal.`,
-  ].join("\n"),
-  poster: () => [
-    `### How to create a lost poster`,
-    `From the **Alerts hub**:`,
-    ``,
-    `1. Open the lost report and hit **Create poster**.`,
-    `2. Customize the headline, reward, contact number, and note.`,
-    `3. Hit **Print / Save as PDF** — you get a print-ready flyer with photo, description, scan code, and tear-off contact tabs, free.`,
-    ``,
-    `Posters work best near where the pet was last seen.`,
-  ].join("\n"),
-  account: () => [
-    `### Your pets & account`,
-    `Sign in (top-right) to see your pets on the **dashboard**, register new ones, and manage profiles:`,
-    ``,
-    `1. **Sign up** with a name, email, and password — or explore instantly with the demo.`,
-    `2. Open the **dashboard** to see your registered pets.`,
-    `3. Pick a pet to edit details, add photos, report it lost, or print its scan code.`,
-    ``,
-    `Guests can still scan photos, browse pets, and use the Alerts hub without an account.`,
-  ].join("\n"),
-  tag: () => [
-    `### Tag numbers & scan codes`,
-    `Every profile gets an auto-generated tag number (like TAG-001-0001) linked to its photos and owner contact.`,
-    ``,
-    `1. Find the tag on the pet's profile or collar printout.`,
-    `2. Type it into **Find-a-pet search** to open the profile instantly.`,
-    `3. No tag? Run a **photo scan** instead — the 4-angle photos work as backup ID.`,
-  ].join("\n"),
-  help: () => [
-    `### What I can help with`,
-    `I'm Ash — ask me anything about animals or the AnimalID app:`,
-    ``,
-    `1. **Animal care:** diet, behavior, play, daily routines, age-specific care, species and breeds, costs.`,
-    `2. **Health guidance:** describe a symptom and I'll walk you through a triage checklist (general guidance, not a diagnosis).`,
-    `3. **Photos:** upload a picture and I'll identify the animal and breed and answer questions about it.`,
-    `4. **Using the app:** scanning, matches, lost & found, sightings, posters, alert subscriptions, tags, and accounts.`,
-    ``,
-    `Try: "How does photo scan work?" or "What should I feed them?"`,
-  ].join("\n"),
-  backend: () => [
-    `### A quick note on that`,
-    `I keep AnimalID's inner workings private, so I can't share backend implementation, code, models, or developer details.`,
-    ``,
-    `What I *can* do is help you use the app or care for your animal — for example:`,
-    ``,
-    `1. **How does photo scan work?** — from your side of the screen.`,
-    `2. **How do I report a sighting?** — step by step.`,
-    `3. **What should I feed them?** — diet and care guidance.`,
-    ``,
-    `Which one shall we do?`,
-  ].join("\n"),
-};
-
-/** General + unknown-symptom offline reply with a triage checklist. */
-function symptomAwareReply(topic, animal, reason) {
-  if (topic !== "symptom") return fallbackReply(animal, reason);
-  const who = petName(animal);
-  const tail =
-    reason === "error"
-      ? `\n\nI'm having trouble reaching the live assistant right now — please try again in a moment. For anything urgent, contact a vet or the hotline at **1-800-555-0199**.`
-      : "";
-  return (
-    [
-      `### Symptom check for ${who}`,
-      `Let's pin down what's going on. Work through this checklist and tell me what you find:`,
-      ``,
-      `☐ **Since when?** Sudden or building up over days?`,
-      `☐ **Eating and drinking normally?**`,
-      `☐ **Energy and mood?** Playful, restless, lethargic, or hiding?`,
-      `☐ **Anything else?** Vomiting, diarrhea, coughing, limping, scratching?`,
-      `☐ **Recent changes?** New food, environment, walks, contacts with other animals?`,
-      ``,
-      `**Red flags — seek a vet urgently if you see:** trouble breathing, pale/blue gums, seizures, major bleeding, bloated painful belly, suspected poisoning, or a pet that can't stand.`,
-      ``,
-      `Describe the main symptom in one or two sentences and I'll narrow down the likely causes with next steps.`,
-    ].join("\n") + tail
-  );
-}
-
 /**
  * POST /api/assistant/chat — Universal AI Pet Care Assistant chat.
  *
@@ -1256,14 +736,17 @@ function symptomAwareReply(topic, animal, reason) {
  *         language?: "auto"|"en"|"si"|"ta"|"es"|"fr"|"ar"|"hi" }
  * The Meta AI key lives only in the backend env (SAM_API_KEY) and is never
  * sent to the frontend. It is resolved per request (with a server/.env
- * reload), so a newly added key works without a restart. Without a key (or
- * when the API call fails), a helpful local triage reply is returned
- * instead of an empty error.
+ * reload), so a newly added key works without a restart.
+ * Every prompt — greetings, general questions, care topics — is answered
+ * live by the model (muse-spark-1.3 by default); there are no canned
+ * replies. Transient Meta API failures (timeouts, proxy resets, 429/5xx)
+ * are retried with backoff, then answered with a short friendly error in
+ * the user's language. A missing key answers 503 the same way.
  * History may carry the most recent user photo so vision follow-ups keep
  * their visual context. Photos ride as input_image data URLs to the
  * vision-capable chat model (ASSISTANT_VISION_MODEL, else the default).
  * The model name is never exposed to clients.
- * Responds with { reply|fallback, ..., module, context } where context is
+ * Responds with { reply, ..., module, context } where context is
  * "pet" when the answer used the selected pet's profile, else "general".
  */
 
@@ -1289,8 +772,36 @@ const GENERAL_CONTEXT_TOPICS = new Set([
   "species",
 ]);
 
+/**
+ * Request socket timeout for /api/assistant/chat: matches the Vite proxy's
+ * 120s window so slow Meta AI replies (axios 60s/90s + transient retries)
+ * always resolve before the proxy gives up and resets the connection.
+ */
+const REQUEST_TIMEOUT_MS = 120000;
+
+/**
+ * True when the client went away — any further send would throw.
+ * NOTE: never use req.destroyed here — Node auto-destroys the readable
+ * request stream once express.json() consumes the body, so it is true for
+ * every healthy POST. req.aborted is deprecated and equally unreliable.
+ * The socket is the truthful signal.
+ */
+function clientGone(req, res) {
+  if (res?.headersSent || res?.writableEnded || res?.destroyed) return true;
+  const socket = req?.socket || res?.socket;
+  return Boolean(socket?.destroyed);
+}
+
 async function chat(req, res, next) {
   try {
+    if (typeof req?.setTimeout === "function") {
+      try {
+        req.setTimeout(REQUEST_TIMEOUT_MS);
+      } catch {
+        /* socket already gone — the clientGone guards below handle it */
+      }
+    }
+    if (clientGone(req, res)) return undefined;
     const message = typeof req.body?.message === "string" ? req.body.message.trim() : "";
     if (!message) {
       return res.status(400).json({ error: "Type a message to chat with Ash." });
@@ -1303,7 +814,7 @@ async function chat(req, res, next) {
     const language = sanitizeLanguage(req.body?.language);
     const careLogs = sanitizeCareLogs(req.body?.careLogs);
     // Explicit module tab selection wins; otherwise the module is detected
-    // from the message so the live prompt + offline reply stay focused.
+    // from the message so the live prompt stays focused.
     const explicitModule = sanitizeModule(req.body?.module);
     const module = explicitModule || detectModule(message);
     const moduleChips = explicitModule && explicitModule !== "general" ? explicitModule : undefined;
@@ -1322,7 +833,11 @@ async function chat(req, res, next) {
     // Read per request (with .env reload) so a newly added key works at once.
     const apiKey = resolveApiKey();
     if (!apiKey) {
-      return res.json({ reply: offlineReply(message, promptAnimal, "offline", Boolean(image), language, { module: explicitModule, careLogs }), fallback: true, engine: "local", suggestions, module, context });
+      // Live-only: without a key there is no model to answer, so fail with
+      // the same short friendly notice (never a canned reply, never a leak
+      // of backend details — the key hint stays in the server log).
+      console.warn("[assistant] SAM_API_KEY is not configured — refusing chat until a key is set.");
+      return res.status(503).json({ error: assistantErrorMessage(language), suggestions, module, context });
     }
 
     const apiUrl = (process.env.SAM_API_URL || "").trim() || DEFAULT_API_URL;
@@ -1352,45 +867,88 @@ async function chat(req, res, next) {
     const attempted = [primaryModel];
     let usedModel = primaryModel;
     try {
-      let response;
-      try {
-        response = await postChat(apiUrl, apiKey, primaryModel, input, timeoutMs);
-      } catch (err) {
-        // The default 1.3 model occasionally reports model_not_found while 1.2
-        // keeps serving — retry once on the previous generation before giving
-        // up to offline mode. An explicit ASSISTANT_MODEL or
-        // ASSISTANT_VISION_MODEL is never second-guessed.
-        const defaulted =
-          !(process.env.ASSISTANT_MODEL || "").trim() &&
-          !(hasImage && (process.env.ASSISTANT_VISION_MODEL || "").trim());
-        if (defaulted && primaryModel !== FALLBACK_CHAT_MODEL && isModelNotFound(err)) {
-          console.warn(
-            `[assistant] ${primaryModel} unavailable (${err?.response?.status || err.message}), retrying with ${FALLBACK_CHAT_MODEL}.`,
-          );
-          attempted.push(FALLBACK_CHAT_MODEL);
-          response = await postChat(apiUrl, apiKey, FALLBACK_CHAT_MODEL, input, timeoutMs);
-          usedModel = FALLBACK_CHAT_MODEL;
-        } else {
-          throw err;
+      // Every prompt goes to the model. Transient failures (proxy resets,
+      // timeouts, 429/5xx) are retried with backoff; anything final fails
+      // fast to the friendly error below — never to canned text.
+      const defaulted =
+        !(process.env.ASSISTANT_MODEL || "").trim() &&
+        !(hasImage && (process.env.ASSISTANT_VISION_MODEL || "").trim());
+      // The first attempt always gets its full window (long replies must not
+      // drop instantly); retries share whatever budget is left after it, so
+      // the whole Meta phase still resolves inside the proxy window.
+      const metaDeadline = Date.now() + META_BUDGET_MS;
+      let response = null;
+      let lastErr = null;
+      let timeoutStrikes = 0;
+      for (let attempt = 1; attempt <= MAX_CHAT_ATTEMPTS && !response; attempt++) {
+        // No budget left for another attempt — fail fast to the friendly
+        // error rather than starting work that cannot finish in time. This
+        // gates retries and model failover alike (attempt 1 always runs).
+        if (attempt > 1 && metaDeadline - Date.now() < RETRY_MIN_BUDGET_MS) break;
+        try {
+          const attemptTimeout = attempt === 1 ? timeoutMs : Math.min(timeoutMs, metaDeadline - Date.now());
+          response = await postChat(apiUrl, apiKey, usedModel, input, attemptTimeout);
+          if (!extractOutputText(response.data).trim()) {
+            response = null;
+            throw Object.assign(new Error("empty assistant response"), { code: "EMPTY_RESPONSE" });
+          }
+        } catch (err) {
+          lastErr = err;
+          if (isTimeoutError(err)) timeoutStrikes += 1;
+          // The default 1.3 model occasionally reports model_not_found while
+          // 1.2 keeps serving — switch generations once, immediately. An
+          // explicit ASSISTANT_MODEL or ASSISTANT_VISION_MODEL is never
+          // second-guessed.
+          if (defaulted && usedModel !== PREVIOUS_CHAT_MODEL && isModelNotFound(err)) {
+            console.warn(
+              `[assistant] ${usedModel} unavailable (${err?.response?.status || err.message}), retrying with ${PREVIOUS_CHAT_MODEL}.`,
+            );
+            usedModel = PREVIOUS_CHAT_MODEL;
+            attempted.push(usedModel);
+            continue;
+          }
+          // A stuck 1.3 gets one same-model retry; a second consecutive
+          // timeout fails over to 1.2 for the final attempt instead of
+          // hammering the unresponsive generation again.
+          if (defaulted && usedModel !== PREVIOUS_CHAT_MODEL && timeoutStrikes >= 2) {
+            console.warn(
+              `[assistant] ${usedModel} unresponsive (timeout x${timeoutStrikes}), failing over to ${PREVIOUS_CHAT_MODEL}.`,
+            );
+            usedModel = PREVIOUS_CHAT_MODEL;
+            attempted.push(usedModel);
+            continue;
+          }
+          if (attempt < MAX_CHAT_ATTEMPTS && isRetryableError(err)) {
+            await sleep(retryDelayMs(attempt));
+            continue;
+          }
+          break;
         }
       }
+      if (!response) throw lastErr;
       const reply = extractOutputText(response.data).trim();
-      if (!reply) throw new Error("empty assistant response");
       if (hasImage) console.log(`[assistant] live vision reply via ${usedModel}.`);
-      return res.json({ reply, fallback: false, engine: "live", suggestions, module, context });
+      // The proxy/client may have reset while Meta AI was answering — never
+      // send into a dead socket (throws) and never leave the chat hanging:
+      // the guards below just stop quietly when the client is already gone.
+      if (clientGone(req, res)) return undefined;
+      return res.json({ reply, engine: "live", suggestions, module, context });
     } catch (err) {
       logChatFailure({ err, apiUrl, models: attempted, hasImage, timeoutMs });
+      if (clientGone(req, res)) return undefined;
       return res.status(502).json({
-        error: "Ash couldn't reach the live assistant just now.",
-        fallback: offlineReply(message, promptAnimal, "error", Boolean(image), language, { module: explicitModule, careLogs }),
+        error: assistantErrorMessage(language),
         suggestions,
         module,
         context,
       });
     }
   } catch (err) {
+    // Never crash the process or send twice on a dead socket: after a proxy
+    // reset there is nobody left to answer, so just stop quietly.
+    if (clientGone(req, res)) return undefined;
     next(err);
   }
 }
 
-module.exports = { chat, sanitizeAnimal, sanitizeHistory, sanitizeImage, sanitizeLanguage, sanitizeModule, sanitizeCareLogs, fallbackReply, systemPrompt, detectTopic, detectModule, suggestReplies, offlineReply, looksNonEnglish, SUPPORTED_LANGUAGES, AI_MODULES, parseEnvKey, resolveApiKey };
+module.exports = { chat, sanitizeAnimal, sanitizeHistory, sanitizeImage, sanitizeLanguage, sanitizeModule, sanitizeCareLogs, systemPrompt, detectTopic, detectModule, suggestReplies, assistantErrorMessage, isRetryableError, isTimeoutError, retryDelayMs, SUPPORTED_LANGUAGES, AI_MODULES, parseEnvKey, resolveApiKey };

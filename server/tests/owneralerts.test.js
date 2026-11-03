@@ -232,8 +232,86 @@ describe("lost-location lifecycle", () => {
   });
 });
 
+describe("lost-only sighting reports", () => {
+  const userPath = require.resolve("../src/models/User.js");
+
+  function stubUser(name) {
+    require.cache[userPath] = {
+      id: userPath,
+      filename: userPath,
+      loaded: true,
+      exports: { findByPk: async () => (name ? { id: 9, name, email: "stranger@example.com" } : null) },
+    };
+  }
+
+  // Run requireAuth -> handler like Express would (sightings need a signed-in
+  // reporter, but any user may report — never just the owner).
+  async function runAuthed(controller, { params, body, token }) {
+    const req = {
+      params: params || {},
+      body: body || {},
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    };
+    const res = mockRes();
+    let authed = false;
+    requireAuth(req, res, () => {
+      authed = true;
+    });
+    if (!authed) return { req, res };
+    await controller.reportSighting(req, res, (err) => {
+      if (err) throw err;
+    });
+    return { req, res };
+  }
+
+  it("rejects sightings for pets that are not marked lost", async () => {
+    stubUser("Sam Reporter");
+    const pet = fakeAnimal({ status: "safe" });
+    const controller = stubAnimals([pet]);
+    const { res } = await runAuthed(controller, {
+      params: { id: 1 },
+      body: { place: "Zilker Park", note: "Saw them!" },
+      token: strangerToken,
+    });
+    assert.equal(res.statusCode, 403);
+    assert.match(res.payload.error, /lost/i);
+    assert.equal(pet.updateCalls.length, 0);
+  });
+
+  it("rejects unauthenticated sighting reports with 401", async () => {
+    stubUser("Sam Reporter");
+    const pet = fakeAnimal({ status: "lost" });
+    const controller = stubAnimals([pet]);
+    const { res } = await runAuthed(controller, {
+      params: { id: 1 },
+      body: { place: "Zilker Park" },
+    });
+    assert.equal(res.statusCode, 401);
+    assert.equal(pet.updateCalls.length, 0);
+  });
+
+  it("records the reporter's identity on the sighting", async () => {
+    stubUser("Sam Reporter");
+    const pet = fakeAnimal({ status: "lost" });
+    const controller = stubAnimals([pet]);
+    const { res } = await runAuthed(controller, {
+      params: { id: 1 },
+      body: { place: "Zilker Park", note: "Near the spring" },
+      token: strangerToken,
+    });
+    assert.equal(res.statusCode, 201);
+    const [sighting] = pet.sightings.slice(-1);
+    assert.equal(sighting.place, "Zilker Park");
+    assert.equal(sighting.reporterUserId, 9);
+    assert.equal(sighting.reporterName, "Sam Reporter");
+    assert.equal(sighting.reporterContact, "stranger@example.com");
+    const last = res.payload.sightings[res.payload.sightings.length - 1];
+    assert.equal(last.reporterName, "Sam Reporter");
+  });
+});
+
 describe("alert route wiring", () => {
-  it("protects alert edit/delete routes but keeps sightings public", () => {
+  it("protects alert edit/delete routes and requires sign-in (not ownership) for sightings", () => {
     const router = require("../src/routes/animalRoutes.js");
     const controller = require("../src/controllers/animalController.js");
     const handlesFor = (method, path) => {
@@ -247,6 +325,7 @@ describe("alert route wiring", () => {
       assert.ok(handles.includes(controller.requireOwner), `${method.toUpperCase()} ${path} requires ownership`);
     }
     const sightingHandles = handlesFor("post", "/:id/sightings");
-    assert.ok(!sightingHandles.includes(controller.requireOwner), "sighting reports stay public");
+    assert.ok(sightingHandles.includes(requireAuth), "sighting reports require sign-in (reporter identity)");
+    assert.ok(!sightingHandles.includes(controller.requireOwner), "any signed-in user may report");
   });
 });

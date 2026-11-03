@@ -16,6 +16,10 @@ export default function Dashboard() {
   const mine = pets.filter((p) => p.ownerEmail === currentUser.email);
   const lost = mine.filter((p) => p.status === "lost");
   const sightings = mine.reduce((n, p) => n + (p.sightings?.length || 0), 0);
+  const recentSightings = mine
+    .flatMap((p) => (p.sightings || []).map((s) => ({ ...s, pet: p })))
+    .sort((a, b) => (b.t || 0) - (a.t || 0))
+    .slice(0, 5);
   const myActivity = filterUserActivity(activity, currentUser.email, 6);
   const nearbyLost = pets.filter((p) => p.status === "lost" && p.ownerEmail !== currentUser.email).slice(0, 4);
 
@@ -92,6 +96,54 @@ export default function Dashboard() {
         </section>
 
         <aside className="space-y-6">
+          {/* Sightings on my pets */}
+          <section className="rounded-2xl border border-stone-200 bg-white p-5">
+            <h2 className="text-sm font-bold tracking-wide text-pine-950 uppercase">
+              Recent sightings
+            </h2>
+            {recentSightings.length ? (
+              <ul className="mt-3 space-y-3">
+                {recentSightings.map((s, i) => (
+                  <li key={`${s.pet.id}-${s.t}-${i}`} className="border-b border-stone-100 pb-3 text-sm last:border-0 last:pb-0">
+                    <p className="font-bold text-pine-950">
+                      {s.pet.name} <span className="font-medium text-stone-500">· {s.place}</span>
+                    </p>
+                    <p className="text-xs text-stone-500">
+                      {timeAgo(s.t)}
+                      {s.reporterName ? ` · reported by ${s.reporterName}` : ""}
+                    </p>
+                    <p className="mt-1 flex items-center gap-3">
+                      <button
+                        onClick={() => navigate("pet", s.pet.id)}
+                        className="cursor-pointer text-xs font-bold text-pine-700 hover:underline"
+                      >
+                        View pet →
+                      </button>
+                      {s.reporterUserId && (
+                        <button
+                          onClick={() =>
+                            navigate("messages", null, {
+                              user: s.reporterUserId,
+                              name: s.reporterName || "",
+                              pet: s.pet.id,
+                            })
+                          }
+                          className="cursor-pointer text-xs font-bold text-pine-700 hover:underline"
+                        >
+                          Message reporter
+                        </button>
+                      )}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-3 text-sm text-stone-500">
+                No sightings yet — they'll land here the moment someone spots your pet.
+              </p>
+            )}
+          </section>
+
           {/* Activity */}
           <section className="rounded-2xl border border-stone-200 bg-white p-5">
             <h2 className="text-sm font-bold tracking-wide text-pine-950 uppercase">

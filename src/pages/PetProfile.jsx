@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { PetAvatar, ScanCode, StatusPill } from "../components/ui";
-import { apiError } from "../lib/api.js";
+import { MaskedContact, PetAvatar, ScanCode, StatusPill } from "../components/ui";
+import api, { apiError } from "../lib/api.js";
+import { isPhoneLike } from "../lib/contact.js";
 import { openAssistant, petDisplayId, petPhoto, timeAgo, toAssistantAnimal, useStore } from "../lib/store";
 
 const ANGLE_LABELS = { front: "Front", left: "Left side", right: "Right side", mark: "Mark" };
@@ -141,6 +142,23 @@ export default function PetProfile() {
     }
   };
 
+  const chatWithOwner = async () => {
+    if (!currentUser) {
+      navigate("auth", null, { mode: "in" });
+      return;
+    }
+    if (isOwner) return;
+    setBusy(true);
+    try {
+      const { data } = await api.get("/messages/peer", { params: { email: pet.ownerEmail } });
+      navigate("messages", null, { user: data.user.id, name: data.user.name || "", pet: pet.id });
+    } catch (err) {
+      toast(apiError(err, "Could not reach the owner."), "warn");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
       <button
@@ -233,11 +251,19 @@ export default function PetProfile() {
                 : [["Registered home address", pet.location]]),
               ["Tag number", pet.tagNumber || displayId, true],
               ["Vet clinic", pet.vet || "Not recorded"],
-              ["Owner", `${pet.ownerName} · ${pet.contact}`],
+              ["Owner", pet.ownerName],
             ].map(([k, v, mono]) => (
               <div key={k}>
                 <dt className="text-xs font-bold tracking-wide text-stone-400 uppercase">{k}</dt>
-                <dd className={`mt-0.5 font-bold text-pine-950 ${mono ? "font-mono" : ""}`}>{v}</dd>
+                <dd className={`mt-0.5 font-bold text-pine-950 ${mono ? "font-mono" : ""}`}>
+                  {v}
+                  {k === "Owner" && pet.contact ? (
+                    <>
+                      {" · "}
+                      <MaskedContact value={pet.contact} revealable={!!currentUser} />
+                    </>
+                  ) : null}
+                </dd>
               </div>
             ))}
             <div className="sm:col-span-2">
@@ -263,37 +289,84 @@ export default function PetProfile() {
                       {s.place} <span className="ml-2 font-medium text-stone-400">{timeAgo(s.t)}</span>
                     </p>
                     {s.note && <p className="mt-1 text-stone-600">{s.note}</p>}
+                    {s.reporterName && (
+                      <p className="mt-1 text-xs font-semibold text-stone-500">
+                        Reported by <span className="font-bold text-pine-800">{s.reporterName}</span>
+                      </p>
+                    )}
+                    {isOwner && s.reporterUserId && (
+                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-stone-100 pt-2">
+                        {s.reporterContact ? (
+                          isPhoneLike(s.reporterContact) ? (
+                            <MaskedContact value={s.reporterContact} className="text-xs text-stone-600" />
+                          ) : (
+                            <a
+                              href={`mailto:${s.reporterContact}`}
+                              className="text-xs font-bold text-pine-700 hover:underline"
+                            >
+                              {s.reporterContact}
+                            </a>
+                          )
+                        ) : null}
+                        <button
+                          onClick={() =>
+                            navigate("messages", null, {
+                              user: s.reporterUserId,
+                              name: s.reporterName || "",
+                              pet: pet.id,
+                            })
+                          }
+                          className="cursor-pointer rounded-md bg-pine-900 px-2.5 py-1 text-xs font-bold text-white hover:bg-pine-800"
+                        >
+                          Message {String(s.reporterName || "reporter").split(" ")[0]}
+                        </button>
+                      </div>
+                    )}
                   </li>
                 ))}
               </ul>
             )}
 
-            <form id="sighting" onSubmit={submitSighting} className="mt-4 rounded-2xl bg-pine-50 p-5">
-              <h3 className="text-sm font-bold text-pine-950">Seen {pet.name}? Report it here</h3>
-              <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                <input
-                  value={sighting.place}
-                  onChange={(e) => setSighting({ ...sighting, place: e.target.value })}
-                  placeholder="Where? e.g. Zilker Park, north trail"
-                  className="rounded-xl border border-stone-300 bg-white px-4 py-2.5 text-sm focus:border-pine-700 focus:outline-none"
-                  aria-label="Sighting location"
-                />
-                <input
-                  value={sighting.note}
-                  onChange={(e) => setSighting({ ...sighting, note: e.target.value })}
-                  placeholder="Details (optional)"
-                  className="rounded-xl border border-stone-300 bg-white px-4 py-2.5 text-sm focus:border-pine-700 focus:outline-none"
-                  aria-label="Sighting details"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={busy}
-                className="mt-3 cursor-pointer rounded-xl bg-pine-900 px-5 py-2.5 text-sm font-bold text-white hover:bg-pine-800 disabled:opacity-60"
-              >
-                Submit sighting
-              </button>
-            </form>
+            {pet.status === "lost" &&
+              (currentUser ? (
+                <form id="sighting" onSubmit={submitSighting} className="mt-4 rounded-2xl bg-pine-50 p-5">
+                  <h3 className="text-sm font-bold text-pine-950">Seen {pet.name}? Report it here</h3>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <input
+                      value={sighting.place}
+                      onChange={(e) => setSighting({ ...sighting, place: e.target.value })}
+                      placeholder="Where? e.g. Zilker Park, north trail"
+                      className="rounded-xl border border-stone-300 bg-white px-4 py-2.5 text-sm focus:border-pine-700 focus:outline-none"
+                      aria-label="Sighting location"
+                    />
+                    <input
+                      value={sighting.note}
+                      onChange={(e) => setSighting({ ...sighting, note: e.target.value })}
+                      placeholder="Details (optional)"
+                      className="rounded-xl border border-stone-300 bg-white px-4 py-2.5 text-sm focus:border-pine-700 focus:outline-none"
+                      aria-label="Sighting details"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={busy}
+                    className="mt-3 cursor-pointer rounded-xl bg-pine-900 px-5 py-2.5 text-sm font-bold text-white hover:bg-pine-800 disabled:opacity-60"
+                  >
+                    Submit sighting
+                  </button>
+                </form>
+              ) : (
+                <div className="mt-4 rounded-2xl bg-pine-50 p-5 text-sm">
+                  <p className="font-bold text-pine-950">Seen {pet.name}? Your report could bring them home.</p>
+                  <p className="mt-1 text-stone-600">Sign in to report this sighting with your name attached.</p>
+                  <button
+                    onClick={() => navigate("auth", null, { mode: "in" })}
+                    className="mt-3 cursor-pointer rounded-xl bg-pine-900 px-5 py-2.5 text-sm font-bold text-white hover:bg-pine-800"
+                  >
+                    Sign in to report a sighting
+                  </button>
+                </div>
+              ))}
           </div>
 
           {/* Timeline */}
@@ -340,10 +413,21 @@ export default function PetProfile() {
               Contact owner
             </p>
             <p className="mt-2 text-sm font-bold text-pine-950">{pet.ownerName}</p>
-            <p className="text-sm text-stone-600">{pet.contact}</p>
+            <div className="mt-0.5 text-sm text-stone-600">
+              <MaskedContact value={pet.contact} revealable={!!currentUser} showCall={false} />
+            </div>
+            {!isOwner && (
+              <button
+                onClick={chatWithOwner}
+                disabled={busy}
+                className="mt-3 block w-full cursor-pointer rounded-xl bg-pine-900 px-4 py-2.5 text-center text-sm font-bold text-white hover:bg-pine-800 disabled:opacity-60"
+              >
+                Chat with Owner
+              </button>
+            )}
             <a
               href={`tel:${String(pet.contact || "").replace(/[^+\d]/g, "")}`}
-              className="mt-3 block cursor-pointer rounded-xl bg-ember-500 px-4 py-2.5 text-center text-sm font-bold text-white hover:bg-ember-600"
+              className="mt-2 block cursor-pointer rounded-xl bg-ember-500 px-4 py-2.5 text-center text-sm font-bold text-white hover:bg-ember-600"
             >
               Call about {pet.name}
             </a>

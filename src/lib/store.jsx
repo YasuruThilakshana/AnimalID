@@ -6,7 +6,7 @@ import {
   useMemo,
   useState,
 } from "react";
-import api, { apiError, getAuthToken, setAuthToken } from "./api.js";
+import api, { apiError, hasSession, markSessionKnown, setAuthToken } from "./api.js";
 import { inferActivityKind } from "./activity.js";
 
 const LS_ACTIVITY = "animalid.activity";
@@ -62,6 +62,15 @@ export function parseHash() {
   if (segments[0] === "pet" && segments[1])
     return { name: "pet", param: decodeURIComponent(segments[1]), query };
   if (segments[0] === "dashboard") return { name: "dashboard", param: null, query };
+  if (segments[0] === "messages") return { name: "messages", param: null, query };
+  if (segments[0] === "why-animalid") return { name: "why", param: null, query };
+  if (segments[0] === "forgot-password") return { name: "forgot-password", param: null, query };
+  if (segments[0] === "reset-password")
+    return {
+      name: "reset-password",
+      param: segments[1] ? decodeURIComponent(segments[1]) : null,
+      query,
+    };
   return { name: "home", param: null, query };
 }
 
@@ -75,6 +84,10 @@ export function buildHash(name, param, query) {
   if (name === "register") return `#/register${q}`;
   if (name === "pet") return `#/pet/${encodeURIComponent(param || "")}${q}`;
   if (name === "dashboard") return "#/dashboard";
+  if (name === "messages") return `#/messages${q}`;
+  if (name === "why") return "#/why-animalid";
+  if (name === "forgot-password") return `#/forgot-password${q}`;
+  if (name === "reset-password") return `#/reset-password/${encodeURIComponent(param || "")}${q}`;
   return "#/";
 }
 
@@ -102,6 +115,7 @@ export function StoreProvider({ children }) {
   const [activity, setActivity] = useState(() => read(LS_ACTIVITY, []));
   const [toasts, setToasts] = useState([]);
   const [notifications, setNotifications] = useState([]);
+  const [messagesUnread, setMessagesUnread] = useState(0);
   const [alertsSeenAt, setAlertsSeenAt] = useState(0);
 
   useEffect(() => {
@@ -141,7 +155,7 @@ export function StoreProvider({ children }) {
   }, []);
 
   const fetchNotifications = useCallback(async () => {
-    if (!getAuthToken()) {
+    if (!hasSession()) {
       setNotifications([]);
       return [];
     }
@@ -157,8 +171,23 @@ export function StoreProvider({ children }) {
 
   const notificationsUnread = useMemo(() => notifications.filter((n) => !n.read).length, [notifications]);
 
+  const fetchMessagesUnread = useCallback(async () => {
+    if (!hasSession()) {
+      setMessagesUnread(0);
+      return 0;
+    }
+    try {
+      const { data } = await api.get("/messages/unread-count");
+      const count = Number(data.unreadCount) || 0;
+      setMessagesUnread(count);
+      return count;
+    } catch {
+      return null; // offline — keep the last known count
+    }
+  }, []);
+
   const markNotificationsRead = useCallback(async () => {
-    if (!getAuthToken()) return;
+    if (!hasSession()) return;
     setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
     try {
       await api.post("/notifications/read-all");
@@ -216,48 +245,52 @@ export function StoreProvider({ children }) {
     }
   }, []);
 
-  // Initial load: session (if a token is stored) + animal registry.
+  // Initial load: probe the cookie session (if any) + animal registry.
+  // The HTTP-only cookie is invisible to JS, so always ask /auth/me.
   useEffect(() => {
     refreshPets();
     (async () => {
-      if (!getAuthToken()) {
-        setAuthReady(true);
-        return;
-      }
       try {
         const { data } = await api.get("/auth/me");
         setCurrentUser(data.user);
+        markSessionKnown(true);
         fetchNotifications();
+        fetchMessagesUnread();
       } catch {
-        setAuthToken(null);
+        markSessionKnown(false);
         setCurrentUser(null);
       } finally {
         setAuthReady(true);
       }
     })();
-  }, [refreshPets, fetchNotifications]);
+  }, [refreshPets, fetchNotifications, fetchMessagesUnread]);
 
   // Lightweight instant-notification polling while signed in.
   useEffect(() => {
     if (!currentUser) return undefined;
-    const id = window.setInterval(fetchNotifications, 45000);
+    const id = window.setInterval(() => {
+      fetchNotifications();
+      fetchMessagesUnread();
+    }, 45000);
     return () => window.clearInterval(id);
-  }, [currentUser, fetchNotifications]);
+  }, [currentUser, fetchNotifications, fetchMessagesUnread]);
 
   const signUp = useCallback(
     async (name, email, password) => {
       try {
         const { data } = await api.post("/auth/register", { name, email, password });
         setAuthToken(data.token);
+        markSessionKnown(true);
         setCurrentUser(data.user);
         fetchNotifications();
+        fetchMessagesUnread();
         logActivity(`${data.user.name} created an account`, data.user.email, "account");
         return { user: data.user };
       } catch (err) {
         return { error: apiError(err) };
       }
     },
-    [logActivity, fetchNotifications],
+    [logActivity, fetchNotifications, fetchMessagesUnread],
   );
 
   const signIn = useCallback(
@@ -265,15 +298,17 @@ export function StoreProvider({ children }) {
       try {
         const { data } = await api.post("/auth/login", { email, password });
         setAuthToken(data.token);
+        markSessionKnown(true);
         setCurrentUser(data.user);
         fetchNotifications();
+        fetchMessagesUnread();
         logActivity(`${data.user.name} signed in`, data.user.email, "account");
         return { user: data.user };
       } catch (err) {
         return { error: apiError(err) };
       }
     },
-    [logActivity, fetchNotifications],
+    [logActivity, fetchNotifications, fetchMessagesUnread],
   );
 
   const signInDemo = useCallback(async () => {
@@ -288,9 +323,15 @@ export function StoreProvider({ children }) {
 
   const signOut = useCallback(async () => {
     if (currentUser?.email) logActivity("Signed out", currentUser.email);
-    setAuthToken(null);
+    try {
+      await api.post("/auth/logout");
+    } catch {
+      /* offline — still clear local state so the UI signs out */
+    }
+    markSessionKnown(false);
     setCurrentUser(null);
     setNotifications([]);
+    setMessagesUnread(0);
   }, [currentUser, logActivity]);
 
   /**
@@ -394,6 +435,8 @@ export function StoreProvider({ children }) {
       notificationsUnread,
       fetchNotifications,
       markNotificationsRead,
+      messagesUnread,
+      fetchMessagesUnread,
       unreadAlerts,
       markAlertsSeen,
     }),
@@ -423,6 +466,8 @@ export function StoreProvider({ children }) {
       notificationsUnread,
       fetchNotifications,
       markNotificationsRead,
+      messagesUnread,
+      fetchMessagesUnread,
       unreadAlerts,
       markAlertsSeen,
     ],

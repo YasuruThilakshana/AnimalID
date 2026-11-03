@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "oxlint",
-    "test": "node --test src/lib/chatStore.test.js src/lib/activity.test.js src/lib/assistant.test.js",
+    "test": "node --test src/lib/chatStore.test.js src/lib/activity.test.js src/lib/assistant.test.js src/lib/contact.test.js src/lib/stripLogs.test.js",
     "preview": "vite preview"
   },
   "dependencies": {
