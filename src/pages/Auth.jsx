@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ScanCode } from "../components/ui";
+import { PasswordInput, ScanCode } from "../components/ui";
 import { useStore } from "../lib/store";
 
 export default function Auth() {
@@ -146,20 +146,28 @@ export default function Auth() {
                 autoComplete="email"
               />
             </div>
-            <div>
-              <label htmlFor="auth-pass" className="mb-1.5 block text-xs font-bold text-stone-600 uppercase">
-                Password
-              </label>
-              <input
-                id="auth-pass"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder={mode === "up" ? "At least 6 characters" : "Your password"}
-                className={inputCls}
-                autoComplete={mode === "up" ? "new-password" : "current-password"}
-              />
-            </div>
+            <PasswordInput
+              id="auth-pass"
+              label="Password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder={mode === "up" ? "At least 6 characters" : "Your password"}
+              autoComplete={mode === "up" ? "new-password" : "current-password"}
+            />
+
+            {mode === "in" && (
+              <p className="text-right text-sm">
+                <button
+                  type="button"
+                  onClick={() =>
+                    navigate("forgot-password", null, email.trim() ? { email: email.trim() } : null)
+                  }
+                  className="cursor-pointer font-semibold text-pine-700 hover:underline"
+                >
+                  Forgot your password?
+                </button>
+              </p>
+            )}
 
             {error && (
               <p className="rounded-xl bg-ember-50 px-4 py-3 text-sm font-semibold text-ember-700" role="alert">

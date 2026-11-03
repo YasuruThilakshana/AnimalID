@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { isPhoneLike, maskPhone, telHref } from "../lib/contact.js";
 import { speciesGradient } from "../lib/store";
 
 export function Logo({ dark = false }) {
@@ -107,6 +109,119 @@ export function EmptyState({ title, body, action }) {
       <h3 className="font-display mt-3 text-lg font-bold text-pine-950">{title}</h3>
       <p className="mx-auto mt-1 max-w-sm text-sm text-stone-600">{body}</p>
       {action && <div className="mt-4">{action}</div>}
+    </div>
+  );
+}
+
+function EyeIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-4 w-4"
+      aria-hidden="true"
+    >
+      <path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function EyeOffIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className="h-4 w-4"
+      aria-hidden="true"
+    >
+      <path d="M10.733 5.076a10.74 10.74 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.972 2.999" />
+      <path d="M10.71 5.091A10.7 10.7 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.672 2.68" />
+      <path d="M6.61 6.61A13.526 13.526 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" />
+      <line x1="2" x2="22" y1="2" y2="22" />
+    </svg>
+  );
+}
+
+/**
+ * Privacy-safe phone display: masked digits by default, a Call action that
+ * dials via the native `tel:` handler, and an optional reveal toggle for
+ * verified (signed-in) viewers. Raw digits never render as plain text.
+ * Non-phone values (emails, blanks) render untouched.
+ */
+export function MaskedContact({
+  value,
+  showCall = true,
+  revealable = true,
+  className = "",
+  callClassName = "cursor-pointer text-xs font-bold text-pine-700 hover:underline",
+}) {
+  const [revealed, setRevealed] = useState(false);
+  const text = String(value || "");
+  if (!text) return null;
+  if (!isPhoneLike(text)) return <span className={className}>{text}</span>;
+  return (
+    <span className={`inline-flex flex-wrap items-center gap-x-2 gap-y-0.5 ${className}`}>
+      <span className="font-mono font-bold tracking-wide" aria-label={revealed ? "Phone number" : "Masked phone number"}>
+        {revealed ? text : maskPhone(text)}
+      </span>
+      {revealable && (
+        <button
+          type="button"
+          onClick={() => setRevealed((v) => !v)}
+          className="cursor-pointer rounded p-0.5 text-stone-500 hover:bg-stone-100 hover:text-pine-900"
+          aria-label={revealed ? "Hide phone number" : "Show phone number"}
+          aria-pressed={revealed}
+        >
+          {revealed ? <EyeOffIcon /> : <EyeIcon />}
+        </button>
+      )}
+      {showCall && (
+        <a href={telHref(text)} className={callClassName}>
+          Call
+        </a>
+      )}
+    </span>
+  );
+}
+
+/** Password field with an inline show/hide toggle button. */
+export function PasswordInput({ id, label, value, onChange, placeholder, autoComplete }) {
+  const [showPassword, setShowPassword] = useState(false);
+  return (
+    <div>
+      <label htmlFor={id} className="mb-1.5 block text-xs font-bold text-stone-600 uppercase">
+        {label}
+      </label>
+      <div className="relative">
+        <input
+          id={id}
+          type={showPassword ? "text" : "password"}
+          value={value}
+          onChange={onChange}
+          placeholder={placeholder}
+          autoComplete={autoComplete}
+          className="w-full rounded-xl border border-stone-300 bg-white px-4 py-2.5 pr-11 text-sm focus:border-pine-700 focus:outline-none"
+        />
+        <button
+          type="button"
+          onClick={() => setShowPassword((v) => !v)}
+          aria-label={showPassword ? "Hide password" : "Show password"}
+          aria-pressed={showPassword}
+          title={showPassword ? "Hide password" : "Show password"}
+          className="absolute top-1/2 right-3 -translate-y-1/2 cursor-pointer text-stone-400 hover:text-pine-700"
+        >
+          {showPassword ? <EyeOffIcon /> : <EyeIcon />}
+        </button>
+      </div>
     </div>
   );
 }

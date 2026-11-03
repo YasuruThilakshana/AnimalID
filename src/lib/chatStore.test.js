@@ -7,6 +7,7 @@ import {
   loadChatFrom,
   saveChatTo,
   clearChatFor,
+  resolvePetSelection,
 } from "./chatStore.js";
 
 /** In-memory localStorage stand-in. */
@@ -98,5 +99,36 @@ describe("chat storage hygiene", () => {
     assert.equal(saveChatTo(broken, "k", []), false);
     assert.equal(clearChatFor(broken, "k"), false);
     assert.equal(purgeLegacyChat(broken), false);
+  });
+});
+
+describe("pet selection isolation", () => {
+  const petA = { id: 1, name: "Maple", ownerEmail: "a@x.com" };
+  const petB = { id: 2, name: "Rex", ownerEmail: "b@x.com" };
+  const pets = [petA, petB];
+  const userA = { id: 1, email: "a@x.com" };
+  const userB = { id: 2, email: "b@x.com" };
+
+  it("keeps a selection only for its owner's session", () => {
+    assert.equal(resolvePetSelection("1", pets, userA), petA);
+    assert.equal(resolvePetSelection(2, pets, userB), petB);
+  });
+
+  it("drops another account's pet on login switch", () => {
+    assert.equal(resolvePetSelection("1", pets, userB), null);
+    assert.equal(resolvePetSelection("2", pets, userA), null);
+  });
+
+  it("clears the selection on logout and drops non-registry context", () => {
+    assert.equal(resolvePetSelection("1", pets, null), null);
+    assert.equal(resolvePetSelection("context", pets, userA), null);
+    assert.equal(resolvePetSelection("", pets, userA), null);
+    assert.equal(resolvePetSelection("99", pets, userA), null);
+  });
+
+  it("tolerates malformed registries without throwing", () => {
+    assert.equal(resolvePetSelection("1", null, userA), null);
+    assert.equal(resolvePetSelection("1", [null, { id: 1 }], userA), null);
+    assert.equal(resolvePetSelection(null, pets, userA), null);
   });
 });

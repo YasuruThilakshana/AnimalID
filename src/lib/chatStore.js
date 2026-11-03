@@ -11,6 +11,27 @@ const CHAT_KEY_PREFIX = "animalid.chat.";
 const GUEST_SUFFIX = "guest";
 const MAX_STORED = 40;
 
+/**
+ * Resolve which registry pet (if any) an Ask Ash selection may keep for a
+ * session identity. The selection survives only when it names a pet the
+ * current user owns — anything else (another account's pet, a logged-out
+ * session, a non-registry "context" attachment, an unknown id) resolves to
+ * null so the assistant falls back to general mode. Never throws.
+ */
+export function resolvePetSelection(petId, pets, currentUser) {
+  try {
+    if (!currentUser || petId === undefined || petId === null || petId === "" || petId === "context") {
+      return null;
+    }
+    const list = Array.isArray(pets) ? pets : [];
+    const pet = list.find((p) => p && String(p.id) === String(petId));
+    if (!pet || pet.ownerEmail !== currentUser.email) return null;
+    return pet;
+  } catch {
+    return null;
+  }
+}
+
 /** Storage key for a session identity: user object, raw id, or nothing (guest). */
 export function chatKeyFor(user) {
   const id = user !== null && typeof user === "object" ? (user.id ?? user.email) : user;

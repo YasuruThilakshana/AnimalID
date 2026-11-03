@@ -51,6 +51,24 @@ const Notification = sequelize.define(
       allowNull: false,
       defaultValue: "",
     },
+    scannerUserId: {
+      type: DataTypes.INTEGER.UNSIGNED,
+      allowNull: true,
+      defaultValue: null,
+      field: "scanner_user_id",
+    },
+    scannerName: {
+      type: DataTypes.STRING(120),
+      allowNull: false,
+      defaultValue: "",
+      field: "scanner_name",
+    },
+    scannerContact: {
+      type: DataTypes.STRING(160),
+      allowNull: false,
+      defaultValue: "",
+      field: "scanner_contact",
+    },
     read: {
       type: DataTypes.BOOLEAN,
       allowNull: false,

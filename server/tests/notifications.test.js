@@ -13,10 +13,11 @@ describe("owner notification schema", () => {
     const Notification = require("../src/models/Notification.js");
     assert.equal(Notification.getTableName(), "notifications");
     const attrs = Notification.getAttributes();
-    for (const key of ["ownerEmail", "petId", "petName", "type", "title", "message", "location", "read"]) {
+    for (const key of ["ownerEmail", "petId", "petName", "type", "title", "message", "location", "read", "scannerUserId", "scannerName", "scannerContact"]) {
       assert.ok(attrs[key], `${key} attribute`);
     }
     assert.equal(attrs.ownerEmail.field, "owner_email");
+    assert.equal(attrs.scannerUserId.field, "scanner_user_id");
   });
 });
 
@@ -154,6 +155,30 @@ describe("found-scan owner trigger", () => {
     const out = await animalController.maybeNotifyFoundScan({ match: lostMatch(), scanLocation: "Zilker Park" });
     assert.equal(out.notified, true);
     assert.equal(store.rows.length, 2);
+  });
+
+  it("records the signed-in scanner's identity on the notification", async () => {
+    const store = makeNotifStore();
+    const { animalController } = stubNotification(store);
+    const out = await animalController.maybeNotifyFoundScan({
+      match: lostMatch(),
+      scanLocation: "Zilker Park",
+      scanner: { userId: 9, name: "Sam Finder", contact: "sam@example.com" },
+    });
+    assert.equal(out.notified, true);
+    assert.equal(store.rows[0].scannerUserId, 9);
+    assert.equal(store.rows[0].scannerName, "Sam Finder");
+    assert.equal(store.rows[0].scannerContact, "sam@example.com");
+  });
+
+  it("leaves guest scans anonymous", async () => {
+    const store = makeNotifStore();
+    const { animalController } = stubNotification(store);
+    const out = await animalController.maybeNotifyFoundScan({ match: lostMatch(), scanLocation: null });
+    assert.equal(out.notified, true);
+    assert.equal(store.rows[0].scannerUserId, null);
+    assert.equal(store.rows[0].scannerName, "");
+    assert.equal(store.rows[0].scannerContact, "");
   });
 });
 

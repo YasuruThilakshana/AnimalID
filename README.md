@@ -39,8 +39,9 @@ with `{ reply, suggestions }`. It chats via the Meta AI API (same `SAM_API_KEY`,
 model in `ASSISTANT_MODEL`) with a triage-style system prompt: emergencies
 first, then clarifying questions, a self-check checklist, an action plan, and
 when to see a vet — plus guidance for the app's register/scan/lost/found flows.
-Without a key (or when the API fails) it returns topic-aware offline replies
-with checklists, so the chat always answers. The floating chat widget adds
+Every reply is generated live by the model: transient API failures are
+retried, then answered with a short friendly error (503 without a key, 502
+when Meta AI is unreachable) — never a canned reply. The floating chat widget adds
 voice input (speech-to-text mic) and voice replies (speech toggle) using the
 browser's built-in speech APIs — no extra service needed. The live assistant
 replies in the user's own language, covers food, diseases, behavior, and price
@@ -57,7 +58,13 @@ downscaled JPEG data URL) so users can ask follow-up questions about it.
 | POST   | /api/animals             | Register (multipart photo angles)  |
 | PUT    | /api/animals/:id         | Update a record                    |
 | DELETE | /api/animals/:id         | Delete a record                    |
-| POST   | /api/animals/:id/sightings | Report a sighting                |
+| POST   | /api/animals/:id/sightings | Report a sighting (lost pets, signed-in) |
+| GET    | /api/messages/peer?email= | Resolve a chat peer (Bearer [REDACTED])   |
+| GET    | /api/messages/threads    | My conversations (Bearer [REDACTED])      |
+| GET    | /api/messages/thread/:userId | History with one user              |
+| POST   | /api/messages            | Send a 1-on-1 message                |
+| POST   | /api/messages/image      | Upload a chat photo (multipart)      |
+| GET    | /api/messages/unread-count | Unread badge count                 |
 | POST   | /api/animals/scan        | Photo search (multipart `photo`)   |
 | POST   | /api/assistant/chat      | Animal specialist chat (`{message, history, animal}`) |
 | POST   | /api/auth/register       | Create account (returns JWT)       |

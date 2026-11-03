@@ -1,16 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import api from "../lib/api.js";
-import { AI_MODULES, assistantReply } from "../lib/assistant";
 import Markdown from "../lib/markdown.jsx";
 import { petPhoto, speciesGradient, toAssistantAnimal, useStore } from "../lib/store";
-import { chatKeyFor, clearChatFor, loadChatFrom, purgeLegacyChat, saveChatTo } from "../lib/chatStore.js";
+import { chatKeyFor, clearChatFor, loadChatFrom, purgeLegacyChat, resolvePetSelection, saveChatTo } from "../lib/chatStore.js";
 import { createPortal } from "react-dom";
 import { detectLangCode, listen, recognitionSupported, speak, stopSpeaking, synthesisSupported, VOICE_LANGUAGES } from "../lib/voice.js";
 
 const LS_VOICE = "animalid.voice";
 const LS_LANG = "animalid.lang";
 const DEFAULT_PHOTO_QUESTION = "Please look at this photo and tell me about this animal.";
-const GENERAL_MODULE = "general";
 // Frontend safety net so a dead link can never hang the typing indicator:
 // the backend answers within ~90s worst case, then we fall back locally.
 const CHAT_REQUEST_TIMEOUT_MS = 120000;
@@ -39,15 +37,26 @@ function fileToChatImage(file) {
   });
 }
 
-/** Placeholder hint per care module. */
-const MODULE_PLACEHOLDERS = {
-  nutrition: "Ask about diets, portions, safe foods…",
-  health: "Describe symptoms or ask first-aid…",
-  behavior: "Ask about training or behavior…",
-  planner: "Ask for schedules, routines, reminders…",
-  "vet-report": "Ask for a vet-visit summary…",
-  budget: "Ask about care costs…",
+/**
+ * One-line connectivity notice per language, shown only when the backend
+ * itself is unreachable (every real answer comes from Meta AI, and server
+ * failures already arrive with their own localized message).
+ */
+const CHAT_ERROR_NOTICE = {
+  en: "Sorry — Ash couldn't be reached just now. Check your connection and try again.",
+  si: "සමාවන්න — Ash ට දැන් සම්බන්ධ විය නොහැක. සම්බන්ධතාව පරීක්ෂා කර නැවත උත්සාහ කරන්න.",
+  ta: "மன்னிக்கவும் — Ash-ஐ இப்போது அணுக முடியவில்லை. இணைப்பைச் சரிபார்த்து மீண்டும் முயற்சிக்கவும்.",
+  es: "Lo siento — no se pudo contactar con Ash. Revisa tu conexión e inténtalo de nuevo.",
+  fr: "Désolé — Ash est injoignable pour le moment. Vérifie ta connexion et réessaie.",
+  ar: "عذرًا — تعذّر الوصول إلى Ash الآن. تحقق من الاتصال وحاول مجددًا.",
+  hi: "क्षमा करें — Ash से अभी संपर्क नहीं हो सका। अपना कनेक्शन जाँचें और पुनः प्रयास करें।",
 };
+
+/** Connectivity notice in the user's language (auto/unknown → English). */
+function chatErrorNotice(language) {
+  const base = String(language || "auto").split(/[-_]/)[0].toLowerCase();
+  return CHAT_ERROR_NOTICE[base] || CHAT_ERROR_NOTICE.en;
+}
 
 /** Care-log entries (timeline + sightings) sent with chat for vet reports. */
 function careLogsFor(pet) {
@@ -82,69 +91,6 @@ const STATUS_META = {
   found: { dot: "bg-amber-500", label: "Found", pill: "bg-brass-100 text-yellow-900" },
 };
 
-const MODULE_ICONS = {
-  all: (
-    <>
-      <path d="M12 4l1.7 4.3L18 10l-4.3 1.7L12 16l-1.7-4.3L6 10l4.3-1.7L12 4z" />
-      <path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8L19 15z" />
-    </>
-  ),
-  nutrition: (
-    <>
-      <path d="M4 13h16c0 3.9-3.6 7-8 7s-8-3.1-8-7z" />
-      <path d="M9.5 9.5c-1.2-1.2.8-2.3-.4-3.5M14.5 9.5c-1.2-1.2.8-2.3-.4-3.5" />
-    </>
-  ),
-  health: (
-    <>
-      <circle cx="12" cy="12" r="8.5" />
-      <path d="M12 8.5v7M8.5 12h7" />
-    </>
-  ),
-  behavior: (
-    <>
-      <path d="M4 6.5h16v9H9.5L4 19.5v-13z" />
-      <path d="M8 10.5h8M8 13h5" />
-    </>
-  ),
-  planner: (
-    <>
-      <rect x="4.5" y="5.5" width="15" height="14" rx="2.5" />
-      <path d="M4.5 10h15M9 3.5v3.5M15 3.5v3.5" />
-    </>
-  ),
-  "vet-report": (
-    <>
-      <rect x="6" y="5" width="12" height="15.5" rx="2" />
-      <path d="M9.5 5V3.5h5V5M9.5 11h5M9.5 14h5" />
-    </>
-  ),
-  budget: (
-    <>
-      <ellipse cx="12" cy="7" rx="6.5" ry="2.5" />
-      <path d="M5.5 7v10c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5V7" />
-      <path d="M5.5 12c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5" />
-    </>
-  ),
-};
-
-function ModuleIcon({ id, className = "h-3.5 w-3.5" }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.8}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden="true"
-    >
-      {MODULE_ICONS[id] || MODULE_ICONS.all}
-    </svg>
-  );
-}
-
 /** Round pet thumbnail: uploaded photo, else a species-gradient initial. */
 function PetAvatarMini({ pet, className = "h-7 w-7" }) {
   const photo = petPhoto(pet);
@@ -169,21 +115,13 @@ function PetAvatarMini({ pet, className = "h-7 w-7" }) {
   );
 }
 
-/** Header badge showing which engine answered last: Live, Local, or nothing yet. */
+/** Header badge showing the live engine answered: Live, or nothing yet. */
 function ModeBadge({ mode }) {
   if (mode === "live") {
     return (
       <span className="inline-flex items-center gap-1 rounded-full bg-emerald-400/20 px-2 py-0.5 text-[10px] font-black tracking-wide text-emerald-300 uppercase">
         <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" aria-hidden="true" />
         Live
-      </span>
-    );
-  }
-  if (mode === "local") {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-amber-400/20 px-2 py-0.5 text-[10px] font-black tracking-wide text-amber-300 uppercase">
-        <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden="true" />
-        Local
       </span>
     );
   }
@@ -199,13 +137,12 @@ export default function Assistant() {
   const [messages, setMessages] = useState([]);
   const [lastContext, setLastContext] = useState(null); // "pet" | "general" per last reply
   const [animal, setAnimal] = useState(null);
-  const [module, setModule] = useState(GENERAL_MODULE);
   // petId: "" = general advice, a registry id = selected pet, "context" = an
   // attached animal from the scanner/pet page that isn't in the dropdown.
   const [petId, setPetId] = useState("");
   const [petMenuOpen, setPetMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0, width: 0 });
-  const [mode, setMode] = useState(null); // last assistant engine: "live" | "local" | null
+  const [mode, setMode] = useState(null); // "live" once Meta AI has answered, else null
   const [voiceOn, setVoiceOn] = useState(() => {
     try {
       return localStorage.getItem(LS_VOICE) === "1" && synthesisSupported();
@@ -223,7 +160,7 @@ export default function Assistant() {
       return "auto";
     }
   });
-  const bottomRef = useRef(null);
+  const listRef = useRef(null);
   const fileRef = useRef(null);
   const petBtnRef = useRef(null);
 
@@ -238,7 +175,7 @@ export default function Assistant() {
 
   const messagesRef = useRef(messages);
   const animalRef = useRef(animal);
-  const moduleRef = useRef(module);
+  const petIdRef = useRef(petId);
   const typingRef = useRef(false);
   const voiceRef = useRef(false);
   const langRef = useRef(language);
@@ -258,8 +195,8 @@ export default function Assistant() {
     animalRef.current = animal;
   }, [animal]);
   useEffect(() => {
-    moduleRef.current = module;
-  }, [module]);
+    petIdRef.current = petId;
+  }, [petId]);
   useEffect(() => {
     petsRef.current = pets;
   }, [pets]);
@@ -304,6 +241,20 @@ export default function Assistant() {
     setPhoto(null);
     photoRef.current = null;
     setInput("");
+    // Account isolation for the selected pet: keep the selection only when
+    // it still names one of the new identity's pets — otherwise fall back
+    // to general mode, so one account never personalizes another's session
+    // (covers logout, account switch, and demo mode alike).
+    const kept = resolvePetSelection(petIdRef.current, petsRef.current, currentUser);
+    const keptAnimal = kept ? toAssistantAnimal(kept) : null;
+    petIdRef.current = kept ? String(kept.id) : "";
+    setPetId(petIdRef.current);
+    animalRef.current = keptAnimal;
+    setAnimal(keptAnimal);
+    setMode(null);
+    setLastContext(null);
+    setPetMenuOpen(false);
+    injectedNotifsRef.current = new Set();
     chatKeyRef.current = key;
     const stored = loadChatFrom(localStorage, key);
     // First load with unsent pre-auth messages: adopt them into this identity.
@@ -321,8 +272,10 @@ export default function Assistant() {
     saveChatTo(localStorage, key, messages);
   }, [messages]);
 
+  // Scroll only the message list (never the page or panel), so the header
+  // and input stay pinned while bubbles glide to the newest message.
   useEffect(() => {
-    if (open) bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    if (open) listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, typing, open]);
 
   useEffect(() => {
@@ -360,8 +313,8 @@ export default function Assistant() {
     (forAnimal) => {
       const name = currentUser ? `, ${currentUser.name.split(" ")[0]}` : "";
       const about = forAnimal?.name
-        ? ` I'll personalize every answer for **${forAnimal.name}**${forAnimal.species ? ` (${forAnimal.species}${forAnimal.breed ? ` · ${forAnimal.breed}` : ""})` : ""} using their full profile — switch pets or care modules above anytime, or ask in any language.`
-        : " Select one of your pets above for personalized advice, pick a care module (nutrition, health, training, schedules, vet reports, budgets), or just ask — I cover dogs, cats, birds, reptiles, fish, farm, and exotic pets, in any language.";
+        ? ` I'll personalize every answer for **${forAnimal.name}**${forAnimal.species ? ` (${forAnimal.species}${forAnimal.breed ? ` · ${forAnimal.breed}` : ""})` : ""} using their full profile — switch pets above anytime, or ask in any language.`
+        : " Select one of your pets above for personalized advice, or just ask — I cover dogs, cats, birds, reptiles, fish, farm, and exotic pets, in any language.";
       return { from: "bot", text: `Hi${name}! I'm Ash — your Universal AI Pet Care Assistant, powered by Meta AI.${about}` };
     },
     [currentUser],
@@ -388,7 +341,6 @@ export default function Assistant() {
       setPhoto(null);
       photoRef.current = null;
       const context = animalOverride !== undefined ? animalOverride : animalRef.current;
-      const activeModule = moduleRef.current;
       // Carry the recent photo along so follow-ups ("what about its skin?")
       // keep their visual context; the server keeps only the latest one.
       const history = messagesRef.current
@@ -401,8 +353,8 @@ export default function Assistant() {
             message: text,
             history,
             animal: context,
-            // General mode lets the server detect the module from the message.
-            module: activeModule === GENERAL_MODULE ? undefined : activeModule,
+            // No module picker: the server detects the care module from the message.
+            module: undefined,
             careLogs: careLogsFor(fullPetRef.current),
             image: shot,
             language: langRef.current,
@@ -410,30 +362,22 @@ export default function Assistant() {
           { timeout: CHAT_REQUEST_TIMEOUT_MS },
         );
         if (convo !== convoRef.current) return; // cleared or user switched meanwhile
-        setMessages((m) => [...m, { from: "bot", text: data.reply, offline: Boolean(data.fallback) }]);
-        setMode(data.fallback ? "local" : "live");
+        setMessages((m) => [...m, { from: "bot", text: data.reply }]);
+        setMode("live");
         setLastContext(data.context === "pet" || data.context === "general" ? data.context : null);
       } catch (err) {
         if (convo !== convoRef.current) return; // cleared or user switched meanwhile
+        // Live-only: a failed request shows the server's short friendly error
+        // (or a one-line connectivity notice when the backend itself is
+        // unreachable) with a retry — never a canned answer.
         const body = err?.response?.data || {};
-        if (typeof body.fallback === "string" && body.fallback) {
-          // The API call failed server-side: show its helpful fallback message.
-          setMessages((m) => [...m, { from: "bot", text: body.fallback, offline: true }]);
-          setMode("local");
-          setLastContext(body.context === "pet" || body.context === "general" ? body.context : null);
-        } else {
-          // Backend unreachable: answer from the local module-aware brain so the chat never dead-ends.
-          const res = assistantReply(text, {
-            pets: petsRef.current,
-            currentUser: userRef.current,
-            activePet: fullPetRef.current || context,
-            module: activeModule,
-          });
-          const note = shot ? "\n\n(You attached a photo — reconnect and I'll examine it, or identify them on the **Scanner** page.)" : "";
-          setMessages((m) => [...m, { from: "bot", text: res.text + note, petIds: res.petIds, offline: true }]);
-          setMode("local");
-          setLastContext(null);
-        }
+        const notice =
+          typeof body.error === "string" && body.error ? body.error : chatErrorNotice(langRef.current);
+        setMessages((m) => [
+          ...m,
+          { from: "bot", text: notice, error: true, retry: text, retryImage: shot || undefined },
+        ]);
+        setLastContext(body.context === "pet" || body.context === "general" ? body.context : null);
       } finally {
         if (convo === convoRef.current) {
           typingRef.current = false;
@@ -448,6 +392,16 @@ export default function Assistant() {
   useEffect(() => {
     sendRef.current = send;
   }, [send]);
+
+  // Re-send the failed prompt (restoring its photo, if any) from an error bubble.
+  const sendRetry = useCallback((m) => {
+    if (!m?.retry || typingRef.current) return;
+    if (m.retryImage) {
+      photoRef.current = m.retryImage;
+      setPhoto(m.retryImage);
+    }
+    sendRef.current(m.retry);
+  }, []);
 
   // Escape or a viewport resize closes the pet dropdown (outside clicks are
   // caught by its overlay). The menu lives in a document.body portal, so it
@@ -478,11 +432,6 @@ export default function Assistant() {
     }
     setPetMenuOpen(!petMenuOpen);
   }, [petMenuOpen]);
-
-  const selectModule = useCallback((id) => {
-    setModule(id);
-    moduleRef.current = id;
-  }, []);
 
   const clearAnimal = useCallback(() => {
     setAnimal(null);
@@ -531,15 +480,22 @@ export default function Assistant() {
     return () => window.removeEventListener("animalid:ask-ash", onAsk);
   }, [greet]);
 
-  // When a pet profile is open, its full context attaches automatically.
+  // When a pet profile is open, its full context attaches automatically —
+  // but never another member's pet (explicit "Ask Ash about X" taps still
+  // attach on demand). Re-runs on identity change so a refresh can't
+  // resurrect the previous account's selection either.
   useEffect(() => {
     if (route.name !== "pet") return;
     const pet = pets.find((p) => String(p.id) === String(route.param) || p.tagNumber === route.param);
+    if (pet && currentUser && pet.ownerEmail !== currentUser.email) {
+      clearAnimal();
+      return;
+    }
     const next = toAssistantAnimal(pet);
     setAnimal(next);
     animalRef.current = next;
     setPetId(pet ? String(pet.id) : "");
-  }, [route.name, route.param, pets]);
+  }, [route.name, route.param, pets, currentUser, clearAnimal]);
 
   // Urgent owner notifications (e.g. a 100% found-scan match) surface as Ash
   // system messages the moment the owner opens the chat. Showing them here
@@ -643,9 +599,9 @@ export default function Assistant() {
     navigate("pet", id);
   };
 
-  const placeholder =
-    MODULE_PLACEHOLDERS[module] ||
-    (animal ? `Ask about ${animal.name || animal.species || "this pet"}…` : "Ask about any pet…");
+  const placeholder = animal
+    ? `Ask about ${animal.name || animal.species || "this pet"}…`
+    : "Ask about any pet…";
 
   return (
     <>
@@ -672,7 +628,7 @@ export default function Assistant() {
           className="fixed right-4 bottom-4 z-50 flex h-[min(600px,calc(100dvh-2rem))] w-[calc(100vw-2rem)] max-w-md flex-col overflow-hidden rounded-2xl border border-white/50 bg-white/85 shadow-2xl backdrop-blur-xl"
           aria-label="AnimalID assistant chat"
         >
-          <header className="flex items-center gap-3 border-b border-white/10 bg-pine-950/90 px-4 py-3 text-white backdrop-blur-md">
+          <header className="flex shrink-0 items-center gap-3 border-b border-white/10 bg-pine-950/90 px-4 py-3 text-white backdrop-blur-md">
             <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-amber-400">
               <svg viewBox="0 0 24 24" className="h-5 w-5 fill-pine-950" aria-hidden="true">
                 <circle cx="7.2" cy="9.4" r="2.1" />
@@ -741,7 +697,7 @@ export default function Assistant() {
             </button>
           </header>
 
-          <div className="border-b border-white/40 bg-white/70 px-3 pt-2 pb-2 backdrop-blur-md">
+          <div className="shrink-0 border-b border-white/40 bg-white/70 px-3 pt-2 pb-2 backdrop-blur-md">
             <div className="relative flex items-stretch gap-1.5">
               <button
                 type="button"
@@ -952,33 +908,10 @@ export default function Assistant() {
                   document.body,
                 )}
             </div>
-            <div className="scroll-slim mt-1.5 flex gap-1.5 overflow-x-auto pb-0.5" role="tablist" aria-label="Care modules">
-              {[{ id: GENERAL_MODULE, label: "All" }, ...AI_MODULES].map((m) => {
-                const active = module === m.id;
-                return (
-                  <button
-                    key={m.id}
-                    role="tab"
-                    aria-selected={active}
-                    onClick={() => selectModule(m.id)}
-                    title={m.blurb || "All care modules"}
-                    className={`flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-bold whitespace-nowrap transition-all duration-150 focus-visible:ring-2 focus-visible:ring-pine-700 focus-visible:outline-none ${
-                      active
-                        ? "bg-pine-900 text-white shadow-md"
-                        : "border border-stone-200 bg-white/80 text-stone-600 hover:border-pine-700/40 hover:text-pine-900"
-                    }`}
-                  >
-                    <ModuleIcon id={m.id === GENERAL_MODULE ? "all" : m.id} />
-                    {m.label}
-                    {active && <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden="true" />}
-                  </button>
-                );
-              })}
-            </div>
           </div>
 
           {lastContext === "general" && animal && (
-            <div className="flex items-center gap-2 border-b border-white/40 bg-amber-50/90 px-3 py-1.5 backdrop-blur-md">
+            <div className="flex shrink-0 items-center gap-2 border-b border-white/40 bg-amber-50/90 px-3 py-1.5 backdrop-blur-md">
               <p className="min-w-0 flex-1 truncate text-[11px] font-bold text-amber-900">
                 General mode — not specific to {animal.name || "your pet"}.
               </p>
@@ -993,7 +926,7 @@ export default function Assistant() {
             </div>
           )}
 
-          <div className="flex-1 min-h-0 space-y-3 overflow-y-auto bg-stone-100/90 p-4">
+          <div ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain bg-stone-100/90 p-4 scroll-smooth">
             {messages.map((m, i) => (
               <div key={i} className={`msg-in ${m.from === "user" ? "flex justify-end" : "flex justify-start"}`}>
                 <div
@@ -1018,12 +951,15 @@ export default function Assistant() {
                     />
                   )}
                   {m.from === "user" ? m.text : <Markdown text={m.text} />}
-                  {m.offline && m.from === "bot" && (
-                    <p className="mt-1.5">
-                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-100/90 px-2 py-0.5 text-[10px] font-black tracking-wide text-amber-800 uppercase">
-                        <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden="true" />
-                        Local fallback
-                      </span>
+                  {m.error && m.from === "bot" && (
+                    <p className="mt-2">
+                      <button
+                        type="button"
+                        onClick={() => sendRetry(m)}
+                        className="cursor-pointer rounded-lg bg-pine-900 px-3 py-1.5 text-xs font-bold text-white transition-colors hover:bg-pine-800 focus-visible:ring-2 focus-visible:ring-pine-700 focus-visible:outline-none"
+                      >
+                        ↻ Try again
+                      </button>
                     </p>
                   )}
                   {!!m.petIds?.length && (
@@ -1054,11 +990,10 @@ export default function Assistant() {
                 </div>
               </div>
             )}
-            <div ref={bottomRef} />
           </div>
 
           {photo && (
-            <div className="flex items-center gap-2 border-t border-stone-200 bg-white px-3 pt-2">
+            <div className="flex shrink-0 items-center gap-2 border-t border-stone-200 bg-white px-3 pt-2">
               <img src={photo} alt="Attached pet photo" className="h-16 w-16 rounded-xl object-cover ring-1 ring-black/10" />
               <p className="min-w-0 flex-1 text-xs font-semibold text-stone-500">
                 Photo attached — ask anything about it
@@ -1079,7 +1014,7 @@ export default function Assistant() {
               e.preventDefault();
               send(input);
             }}
-            className="flex items-center gap-2 border-t border-white/40 bg-white/70 p-3 backdrop-blur-md"
+            className="flex shrink-0 items-center gap-2 border-t border-white/40 bg-white/70 p-3 backdrop-blur-md"
           >
             <button
               type="button"
